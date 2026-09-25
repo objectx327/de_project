@@ -18,7 +18,8 @@ python -m pip install -r requirements.txt
 ```
 ### Порядок выполнения SQL-проверки
 ```
-sql/setup_check.py
+sql/setup_check.sql
+sql/homework_payments.sql
 ```
 
 ### Команда запуска Python-проверки
