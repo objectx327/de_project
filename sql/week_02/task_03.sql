@@ -30,12 +30,28 @@ left join de2_hw.customers c
 	on c.customer_id = o.customer_id
 order by p.payment_id
 ;
+--Контроль
+select
+    count(*) as row_count,
+    count(distinct p.payment_id) as payment_count,
+    sum(p.amount) as total_amount
+from de2_hw.payments p
+left join de2_hw.orders o
+    on p.order_id = o.order_id
+left join de2_hw.customers c
+    on c.customer_id = o.customer_id
+;
 --3. Платежи без заказа и платежи, у которых заказ найден, а клиент отсутствует
 select
 	  p.payment_id
-	  , case when o.order_id is null then 'order_id'
-	  		when c.customer_id is null then 'customer_id'
-	  		end as missing_id
+      , case
+        	when o.order_id is null then 'order_id'
+        	else 'customer_id'
+    		end as missing_object
+	  , case
+			when o.order_id is null then p.order_id
+			else o.customer_id
+			end as missing_id
 from de2_hw.payments p
 left join de2_hw.orders o
 	on p.order_id = o.order_id 

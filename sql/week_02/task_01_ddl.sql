@@ -24,7 +24,8 @@ create table if not exists de2_core.orders
 		, order_currency			text			not null
 		, t_updated_dt				timestamptz		not null
 		, t_load_id					int				not null
-	    , constraint c_order_valid_amount check (order_amount > 0)
+	    , constraint c_orders_valid_amount check (order_amount > 0)
+		, constraint c_orders_valid_currency check (order_currency = 'EUR')
 	)
 ;
 comment on table de2_core.orders is 'Заказы';
@@ -89,7 +90,7 @@ create table if not exists de2_core.payments
 				   (payment_status = 'paid' and paid_at is not null)
 				or (payment_status in ('pending', 'failed') and paid_at is null)
 	    	)
-	    , constraint c_payments_created_vs_paid check (paid_at > created_at)
+	    , constraint c_payments_created_vs_paid check (paid_at >= created_at)
 	)
 ;
 comment on table de2_core.payments is 'Платежи';

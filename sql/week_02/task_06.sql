@@ -35,14 +35,19 @@ with source_rows as
 			and amount > 0 and amount <= 10000					--invalid_amount 
 			and payment_status in ('paid', 'pending', 'failed')	--invalid_status
 			and greatest(created_on, paid_on) <= '2026-09-16'	--future_date
-			and created_on <= paid_on							--paid_before_created
-			and (payment_status = 'paid' and paid_on is not null or paid_on is null)	--status_date_mismatch
+			and (paid_on is null or created_on <= paid_on)	--paid_before_created
+			and (
+					(payment_status = 'paid' and paid_on is not null)
+          			or
+          			(payment_status in ('pending', 'failed') and paid_on is null)
+				) 												--status_date_mismatch
 	)
 , paid as 
 	(
 		select * 
 		from valid
-		where paid_on >= '2026-09-14' and paid_on < '2026-09-17'
+		where payment_status = 'paid' 
+			and paid_on >= '2026-09-14' and paid_on < '2026-09-17'
 	)
 , matched as 
 	(
@@ -102,14 +107,19 @@ with source_rows as
 			and amount > 0 and amount <= 10000					--invalid_amount 
 			and payment_status in ('paid', 'pending', 'failed')	--invalid_status
 			and greatest(created_on, paid_on) <= '2026-09-16'	--future_date
-			and created_on <= paid_on							--paid_before_created
-			and (payment_status = 'paid' and paid_on is not null or paid_on is null)	--status_date_mismatch
+			and (paid_on is null or created_on <= paid_on)	--paid_before_created
+			and (
+					(payment_status = 'paid' and paid_on is not null)
+          			or
+          			(payment_status in ('pending', 'failed') and paid_on is null)
+				) 												--status_date_mismatch
 	)
 , paid as 
 	(
 		select * 
 		from valid
-		where paid_on >= '2026-09-14' and paid_on < '2026-09-17'
+		where payment_status = 'paid' 
+			and paid_on >= '2026-09-14' and paid_on < '2026-09-17'
 	)
 , matched as 
 	(
@@ -189,14 +199,19 @@ with source_rows as
 			and amount > 0 and amount <= 10000					--invalid_amount 
 			and payment_status in ('paid', 'pending', 'failed')	--invalid_status
 			and greatest(created_on, paid_on) <= '2026-09-16'	--future_date
-			and created_on <= paid_on							--paid_before_created
-			and (payment_status = 'paid' and paid_on is not null or paid_on is null)	--status_date_mismatch
+			and (paid_on is null or created_on <= paid_on)	--paid_before_created
+			and (
+					(payment_status = 'paid' and paid_on is not null)
+          			or
+          			(payment_status in ('pending', 'failed') and paid_on is null)
+				) 												--status_date_mismatch
 	)
 , paid as 
 	(
 		select * 
 		from valid
-		where paid_on >= '2026-09-14' and paid_on < '2026-09-17'
+		where payment_status = 'paid' 
+			and paid_on >= '2026-09-14' and paid_on < '2026-09-17'
 	)
 , matched as 
 	(
@@ -235,6 +250,8 @@ left join paid t5
 	on s.delivery_id = t5.delivery_id 
 left join matched t6 
 	on s.delivery_id = t6.delivery_id
+where t6.delivery_id is null
+order by s.delivery_id
 ;
 with source_rows as 
 	(
@@ -273,14 +290,19 @@ with source_rows as
 			and amount > 0 and amount <= 10000					--invalid_amount 
 			and payment_status in ('paid', 'pending', 'failed')	--invalid_status
 			and greatest(created_on, paid_on) <= '2026-09-16'	--future_date
-			and created_on <= paid_on							--paid_before_created
-			and (payment_status = 'paid' and paid_on is not null or paid_on is null)	--status_date_mismatch
+			and (paid_on is null or created_on <= paid_on)	--paid_before_created
+			and (
+					(payment_status = 'paid' and paid_on is not null)
+          			or
+          			(payment_status in ('pending', 'failed') and paid_on is null)
+				) 												--status_date_mismatch
 	)
 , paid as 
 	(
 		select * 
 		from valid
-		where paid_on >= '2026-09-14' and paid_on < '2026-09-17'
+		where payment_status = 'paid' 
+			and paid_on >= '2026-09-14' and paid_on < '2026-09-17'
 	)
 , matched as 
 	(

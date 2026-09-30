@@ -39,6 +39,7 @@ from
 			, payment_id
 			, count(*) over (partition by source_system, payment_id) as cnt
 		from de2_hw.payment_deliveries pd
+		where payment_id is not null
 	) t
 where t.cnt > 1
 union all
