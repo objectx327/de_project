@@ -257,7 +257,7 @@ from de3_dwh.fact_payment
 union 
 select 'src' as lvl, count(*) as rows_cnt, count(distinct payment_id) as cnt_pk,  sum(amount_eur) as sum_amt
 from de3_src.payments p
-where p.order_id in (select order_id from de3_src.orders where is_test is false and status = 'completed')
+where p.order_id in (select order_id from de3_src.orders where is_test is false)
 	and p.status = 'succeeded'
 ;
 select 'fact' as lvl, count(*) as rows_cnt, count(distinct refund_id) as cnt_pk,  sum(amount_eur) as sum_amt 
@@ -268,7 +268,7 @@ from de3_src.refunds r
 inner join de3_src.payments p
 	on r.payment_id = p.payment_id
 	and p.status = 'succeeded'
-where p.order_id in (select order_id from de3_src.orders where is_test is false and status = 'completed')
+where p.order_id in (select order_id from de3_src.orders where is_test is false)
 	and r.status = 'succeeded'
 ;
 --выбранные версии для p05 и p06, а также обработка p11
