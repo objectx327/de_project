@@ -13,8 +13,19 @@ group by c.report_date
 having sum(net_cash_eur) < 0
 ;
 --2. Какова средняя сумма успешного платежа за период? Сравните её с простым средним дневных средних по всем каналам вместе
-select sum(paid_amount_eur)/sum(payment_count) as counted_avg_payment, avg(avg_payment_eur) as avg_payment_eur
-from de3_dwh.mart_cash_daily
+with daily as (
+    select
+        report_date,
+		sum(paid_amount_eur) as sum_paid_amount_eur,
+		sum(payment_count) as sum_payment_count,
+        sum(paid_amount_eur)
+            / nullif(sum(payment_count), 0) as daily_avg
+    from de3_dwh.mart_cash_daily
+    group by report_date
+)
+select round(sum(sum_paid_amount_eur)/sum(sum_payment_count), 2) as counted_avg_payment
+	, round(avg(daily_avg), 2) as avg_daily_payment
+from daily
 ;
 --3. Какова стоимость завершённых заказов по каждой категории? Почему её общий итог отличается от суммы платежей и от net_cash_eur?
 select category_name, sum(ordered_amount_eur) as ordered_amount_eur

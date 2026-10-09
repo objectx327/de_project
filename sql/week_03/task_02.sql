@@ -2,6 +2,8 @@ create schema if not exists de3_dwh;
 -----------------
 --Измерение Клиент
 -----------------
+set time zone 'Europe/Berlin'
+;
 drop table if exists de3_dwh.dim_customer cascade
 ;
 create table if not exists de3_dwh.dim_customer (	
@@ -45,12 +47,7 @@ select
 	, coalesce(cnc.corrected_name, ch.customer_name) as customer_name
 	, ch.segment
 	, ch.valid_from 
--- Существует наложение периодов для двух записей (history_id = 11 и 12) - дата начала действия новой записи равна дате закрытия старой
--- - в условии нигде это не было обозначено, но в реальной витрине я бы предложила исключить такое перекрытие периодов 
--- и закрыть вторую запись на секунду раньше для удобства фильтрации в дальнейшем
-	, case when ch.valid_to >= lead(ch.valid_from) over(partition by ch.source_system, ch.customer_id order by ch.valid_from)
-		then lead(ch.valid_from) over(partition by ch.source_system, ch.customer_id order by ch.valid_from) - interval '1 second' 
-		else ch.valid_to end as valid_to
+	, ch.valid_to
 	, ch.is_current
 from de3_src.customer_history ch 
 left join  de3_src.customer_name_corrections cnc 
@@ -200,7 +197,7 @@ inner join de3_dwh.dim_customer c2
 	on c.source_system = c2.source_system
 	and c.source_customer_id = c2.source_customer_id
 	and c.customer_key != c2.customer_key
-	and c.valid_from between c2.valid_from and coalesce(c2.valid_to, '2100-01-01')	--заглушка для открытых записей
+	and c.valid_from >= c2.valid_from and c.valid_from < coalesce(c2.valid_to, '2100-01-01')	--заглушка для открытых записей
 ; 
 --Только одна открытая запись на клиента
 select source_system, source_customer_id, count(*)

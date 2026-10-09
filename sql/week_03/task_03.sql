@@ -1,3 +1,5 @@
+set time zone 'Europe/Berlin'
+;
 --------------------------
 --Факт - Позиции в заказе
 --------------------------
@@ -10,8 +12,8 @@ create table if not exists de3_dwh.fact_order_item (
 	, customer_key			bigint not null			--fk
     , source_system 		text not null
     , source_customer_id 	text not null
-	, product_key			bigint					--fk
-	, channel_key 			bigint					--fk
+	, product_key			bigint not null			--fk
+	, channel_key 			bigint not null			--fk
 	, quantity				int not null
 	, unit_price_eur		numeric(12,2) not null
 	, line_discount_eur		numeric(12,2) not null
@@ -32,7 +34,8 @@ create table if not exists de3_dwh.fact_order_item (
 			on delete no action
     , constraint c_f_order_item_valid_qnt check (quantity > 0)
     , constraint c_f_order_item_valid_price check (unit_price_eur >= 0)
-    , constraint c_f_order_item_valid_disc check (line_discount_eur <= quantity * unit_price_eur)
+    , constraint c_f_order_item_valid_disc check (line_discount_eur >= 0 and line_discount_eur <= quantity * unit_price_eur)
+	, constraint c_f_order_item_valid_amt check (line_amount_eur >= 0)
 )
 ;
 comment on table de3_dwh.fact_order_item is 'Факт - Позиции в заказе';
@@ -85,7 +88,7 @@ inner join de3_src.order_items oi
 left join de3_dwh.dim_customer dc 
 	on o.customer_id = dc.source_customer_id
 	and o.source_system = dc.source_system
-	and o.ordered_at between dc.valid_from and coalesce(dc.valid_to, '2100-01-01') 
+	and o.ordered_at >= dc.valid_from and (dc.valid_to is null or o.ordered_at < dc.valid_to)
 left join de3_dwh.dim_product dp 
 	on oi.product_id = dp.product_id 
 left join de3_dwh.dim_channel dch
@@ -105,7 +108,7 @@ create table if not exists de3_dwh.fact_payment (
 	, customer_key			bigint not null			--fk
 	, source_system 		text not null
 	, source_customer_id 	text not null
-	, channel_key			bigint					--fk
+	, channel_key			bigint not null			--fk
 	, amount_eur			numeric(12,2) not null
 	, t_changed_dttm		timestamptz default current_timestamp 
 	, constraint fk_f_payment_dim_cust
@@ -156,7 +159,7 @@ inner join de3_src.orders o
 left join de3_dwh.dim_customer dc 
 	on o.customer_id = dc.source_customer_id
 	and o.source_system = dc.source_system
-	and p.occurred_at between dc.valid_from and coalesce(dc.valid_to, '2100-01-01') 
+	and p.occurred_at >= dc.valid_from and (dc.valid_to is null or p.occurred_at < dc.valid_to) 
 left join de3_dwh.dim_channel dch
 	on dch.channel_id = o.channel_id
 where p.status = 'succeeded'
@@ -174,7 +177,7 @@ create table if not exists de3_dwh.fact_refund (
 	, customer_key			bigint not null			--fk
     , source_system 		text not null
     , source_customer_id 	text not null
-	, channel_key			bigint					--fk
+	, channel_key			bigint not null			--fk
 	, amount_eur			numeric(12,2) not null
 	, t_changed_dttm		timestamptz default current_timestamp
 	, constraint fk_f_refund_dim_cust
@@ -231,7 +234,7 @@ inner join de3_src.orders o
 left join de3_dwh.dim_customer dc
 	on o.customer_id = dc.source_customer_id
 	and o.source_system = dc.source_system
-	and r.occurred_at between dc.valid_from and coalesce(dc.valid_to, '2100-01-01')
+	and r.occurred_at >= dc.valid_from and (dc.valid_to is null or r.occurred_at < dc.valid_to)
 left join de3_dwh.dim_channel dch
 	on dch.channel_id = o.channel_id
 where r.status = 'succeeded'
@@ -239,19 +242,22 @@ where r.status = 'succeeded'
 
 ---
 --Сверка кол-ва записей и сумм в фактах и в исходных данных
-select 'fact' as lvl, count(*) as rows_cnt, sum(quantity) as sum_qty, sum(unit_price_eur) as sum_unit_price, sum(line_discount_eur) as sum_disc
-from de3_dwh.fact_order_item
-union 
-select 'src' as lvl, count(*) as rows_cnt, sum(quantity) as sum_qty, sum(unit_price_eur) as sum_unit_price, sum(line_discount_eur) as sum_disc
-from de3_src.order_items oi
-where oi.order_id in (select order_id from de3_src.orders where is_test is false)
+select 'fact' as lvl, count(*), sum(oi.quantity) as sum_quantity, sum(oi.line_amount_eur) as sum_line_amount_eur
+from de3_dwh.fact_order_item oi 
+union all
+select 'src' as lvl, count(*), sum(t.quantity) as sum_quantity, sum(t.quantity * t.unit_price_eur - t.line_discount_eur) as sum_line_amount_eur
+from de3_src.order_items t 
+inner join de3_src.orders o 
+	on o.order_id = t.order_id 
+	and o.is_test is false 
+	and o.status = 'completed'
 ;
 select 'fact' as lvl, count(*) as rows_cnt, count(distinct payment_id) as cnt_pk,  sum(amount_eur) as sum_amt
 from de3_dwh.fact_payment
 union 
 select 'src' as lvl, count(*) as rows_cnt, count(distinct payment_id) as cnt_pk,  sum(amount_eur) as sum_amt
 from de3_src.payments p
-where p.order_id in (select order_id from de3_src.orders where is_test is false)
+where p.order_id in (select order_id from de3_src.orders where is_test is false and status = 'completed')
 	and p.status = 'succeeded'
 ;
 select 'fact' as lvl, count(*) as rows_cnt, count(distinct refund_id) as cnt_pk,  sum(amount_eur) as sum_amt 
@@ -262,7 +268,7 @@ from de3_src.refunds r
 inner join de3_src.payments p
 	on r.payment_id = p.payment_id
 	and p.status = 'succeeded'
-where p.order_id in (select order_id from de3_src.orders where is_test is false)
+where p.order_id in (select order_id from de3_src.orders where is_test is false and status = 'completed')
 	and r.status = 'succeeded'
 ;
 --выбранные версии для p05 и p06, а также обработка p11

@@ -55,14 +55,18 @@ from de3_dwh.fact_refund r
 where r.customer_key = 0
 ;
 --Пересечения периодов клиентов
-select c.*, c2.customer_key, c2.history_id, c2.valid_from, c2.valid_to
+select
+    c.history_id,
+    c2.history_id
 from de3_dwh.dim_customer c
 inner join de3_dwh.dim_customer c2
-	on c.source_system = c2.source_system
-	and c.source_customer_id = c2.source_customer_id
-	and c.customer_key != c2.customer_key
-	and c.valid_from between c2.valid_from and coalesce(c2.valid_to, '2100-01-01')	--заглушка для открытых записей
-where c.customer_key != 0
+    on c.source_system = c2.source_system
+   and c.source_customer_id = c2.source_customer_id
+   and c.customer_key < c2.customer_key
+   and (c2.valid_to is null or c.valid_from < c2.valid_to)
+   and (c.valid_to is null or c2.valid_from < c.valid_to)
+where c.customer_key <> 0
+  	and c2.customer_key <> 0;
 ;
 --несколько открытых версий одного клиента
 select *
@@ -86,32 +90,59 @@ where customer_key != 0
 select *
 from de3_dwh.dim_customer c
 where customer_key != 0 
-	and is_current is false and  valid_to is null
+	and is_current is distinct from (valid_to is null)
 ;
 --Историческая связь факта: выбранная версия относится к правильным source_system + customer_id и покрывает время события
-select oi.customer_key, oi.source_customer_id, oi.source_system, oi.ordered_at, c.*
+select oi.order_id, oi.line_no, oi.customer_key
 from de3_dwh.fact_order_item oi 
 left join de3_dwh.dim_customer c
-	on oi.source_system = c.source_system 
-	and oi.source_customer_id = c.source_customer_id 
-	and oi.ordered_at between c.valid_from and coalesce(c.valid_to, '2100-01-01')
-where not oi.customer_key = c.customer_key
+    on oi.customer_key = c.customer_key
+where oi.customer_key <> 0
+  and (
+      c.customer_key is null
+      or oi.source_system is distinct from c.source_system
+      or oi.source_customer_id is distinct from c.source_customer_id
+      or c.valid_from is null
+      or oi.ordered_at < c.valid_from
+      or (
+          c.valid_to is not null
+          and oi.ordered_at >= c.valid_to
+      	)
+	)
 ;
-select p.customer_key, p.source_customer_id, p.source_system, p.paid_at, c.*
+select p.payment_id, p.customer_key
 from de3_dwh.fact_payment p
 left join de3_dwh.dim_customer c
-	on p.source_system = c.source_system 
-	and p.source_customer_id = c.source_customer_id 
-	and p.paid_at  between c.valid_from and coalesce(c.valid_to, '2100-01-01')
-where not p.customer_key = c.customer_key
+    on p.customer_key = c.customer_key
+where p.customer_key <> 0
+  and (
+      c.customer_key is null
+      or p.source_system is distinct from c.source_system
+      or p.source_customer_id is distinct from c.source_customer_id
+      or c.valid_from is null
+      or p.paid_at < c.valid_from
+      or (
+          c.valid_to is not null
+          and p.paid_at >= c.valid_to
+      	)
+	)
 ;
-select r.customer_key, r.source_customer_id, r.source_system, r.refunded_at, c.*
+select r.refund_id, r.customer_key
 from de3_dwh.fact_refund r
 left join de3_dwh.dim_customer c
-	on r.source_system = c.source_system 
-	and r.source_customer_id = c.source_customer_id 
-	and r.refunded_at   between c.valid_from and coalesce(c.valid_to, '2100-01-01')
-where not r.customer_key = c.customer_key
+    on r.customer_key = c.customer_key
+where r.customer_key <> 0
+  and (
+      c.customer_key is null
+      or r.source_system is distinct from c.source_system
+      or r.source_customer_id is distinct from c.source_customer_id
+      or c.valid_from is null
+      or r.refunded_at < c.valid_from
+      or (
+          c.valid_to is not null
+          and r.refunded_at >= c.valid_to
+      	)
+	)
 ;
 --Потерянные и лишние идентификаторы фактов, расхождения количеств и сумм после обогащения
 select oi.order_id, oi.line_no, oi2.order_id, oi2.line_no
@@ -290,7 +321,7 @@ inner join detail d
 	on sd.snapshot_date = d.snapshot_date 
 	and sd.warehouse_key = d.warehouse_key
 	and sd.product_key = d.product_key
-where sd.quantity_on_hand <> d.quantity_on_hand 
+where sd.quantity_on_hand is distinct from d.quantity_on_hand
 	or sd.snapshot_received <> d.snapshot_received 
 ;
 --отсутствующие ожидаемые даты, категории и каналы
@@ -312,24 +343,37 @@ left join de3_dwh.mart_order_category_daily cd
 	and cd.category_name = p.category_name 
 where cd.report_date is null
 ;
-select distinct d.full_date
+select
+	  d.full_date as snapshot_date
+	, w.warehouse_key
+	, p.product_key
 from de3_dwh.dim_date d
-left join de3_dwh.mart_stock_daily cd 
-	on cd.snapshot_date = d.full_date 
-where d.full_date between '2025-09-01' and '2025-09-03'
-	and cd.snapshot_date is null
+inner join de3_src.assortment a 
+	on d.full_date between '2025-09-01' and '2025-09-03'
+inner join de3_dwh.dim_warehouse w
+	on a.warehouse_id = w.warehouse_id 
+inner join de3_dwh.dim_product p
+	on a.product_id = p.product_id 
+left join de3_dwh.mart_stock_daily  cd 
+	on cd.snapshot_date = d.full_date
+	and cd.warehouse_key = w.warehouse_key
+	and cd.product_key = p.product_key
+where cd.snapshot_date is null or cd.warehouse_key is null or cd.product_key is null
 ;
 ---------------------------
 --Плохие клиентские данные:
 ---------------------------
 --Пересечения периодов клиентов
-select c.*, c2.history_id, c2.valid_from, c2.valid_to
+select
+    c.history_id,
+    c2.history_id
 from de3_src.customer_history_bad c
 inner join de3_src.customer_history_bad c2
-	on c.source_system = c2.source_system
-	and c.customer_id = c2.customer_id
-	and c.history_id != c2.history_id
-	and c.valid_from between c2.valid_from and coalesce(c2.valid_to, '2100-01-01')	--заглушка для открытых записей
+    on c.source_system = c2.source_system
+   and c.customer_id = c2.customer_id
+   and c.history_id < c2.history_id
+   and (c2.valid_to is null or c.valid_from < c2.valid_to)
+   and (c.valid_to is null or c2.valid_from < c.valid_to)
 ;
 --несколько открытых версий одного клиента
 select *
@@ -350,7 +394,7 @@ where valid_to <= valid_from
 --несоответствие is_current и открытого конца
 select *
 from de3_src.customer_history_bad c
-where is_current is false and  valid_to is null
+where is_current is distinct from (valid_to is null)
 ;
 -------------------------------
 --Исправьте запрос аналитика
