@@ -1,0 +1,32 @@
+{
+  "export_date": "2026-09-01",
+  "orders": [
+    {
+      "order_id": "O0001",
+      "customer": {
+        "customer_id": "000041"
+      },
+      "items": [
+        {
+          "line_no": 1,
+          "sku": "A-01",
+          "quantity": 2,
+          "unit_price": "12.50"
+        },
+        {
+          "line_no": 2,
+          "sku": "B-02",
+          "quantity": 1,
+          "unit_price": "40.00"
+        }
+      ]
+    },
+    {
+      "order_id": "O_BAD_NULL",
+      "customer": {
+        "customer_id": "000051"
+      },
+      "items": null
+    }
+  ]
+}

@@ -1121,3 +1121,691 @@ de3_src.payments
 Поведение 0/null: Если записи нет, quantity_on_hand - null<br />
 Форма хранения: представление<br />
 Правило обновления: при обращении к view данные пересчитываются из фактов<br />
+
+
+
+# Неделя 4 - Python для DE-задач
+## Скрипты
+### Загрузка платежей:
+```
+week_04/src/load_payments.py
+```
+
+### Загрузка платежей (контрольный сбой внутри транзакции)
+```
+week_04/src/load_payments_rollback.py
+```
+
+### Обработка заказов
+```
+week_04/src/prepare_orders.py
+```
+
+### Подготовка БД
+```
+week_04/sql/00_setup.sql
+```
+
+### Названия переменных окружения
+```
+$env:PGHOST = "***"
+$env:PGPORT = "***"
+$env:PGDATABASE = "***"
+$env:PGUSER = "***"
+```
+
+## Правила источников
+### Договор с источником платежей
+Одна запись CSV - один состоявшийся платёж. Кодировка UTF-8 без BOM, разделитель точка с запятой, символ кавычек ". Перенос строки внутри комментария допустим. Порядок колонок может отличаться. <br />
+Заголовок должен содержать ровно семь указанных ниже уникальных имён. Отсутствующее, дополнительное или повторяющееся имя, другой регистр и пробелы в имени колонки считаются ошибкой файла. <br />
+
+| Исходное поле | Поле результата | Правило |
+|-----|---|---|
+|Payment ID | payment_id | Непустая строка после strip(). Ведущие нули сохраняются |
+|Amount | amount | Decimal. Целое или 1-2 знака после запятой. Значение > 0 и <= 9999999999.99 |
+|Currency | currency | Убрать крайние пробелы, привести к верхнему регистру. Допустимо только EUR |
+| Created At | created_at | Момент создания платежа: ISO 8601 с явным смещением от UTC |
+|Paid At |paid_at |Момент оплаты в том же формате. Не раньше created_at |
+|Status |status |После strip() и casefold(): paid или оплачен. Оба значения преобразуются в paid |
+|Comment |comment |Строка, в том числе пустая. Сохранить содержимое без изменений |
+
+Все значения, кроме комментария, обязательны. В сумме разрешены только цифры и необязательная десятичная запятая: без знака, пробелов внутри числа, разделителей тысяч, экспоненты и обозначения валюты. Точка в сумме этого CSV недопустима. Лишние десятичные знаки отклоняются, округлять их нельзя. <br />
+При преобразовании сумм убираются только крайние пробелы. Моменты времени переводятся в UTC. Не подставляется текущая дата, ноль или иной статус вместо ошибочного значения. 
+
+#### Повторы и допуск к загрузке <br />
+Если очищенный Payment ID встречается в файле несколько раз, отклоняются все записи с этим ключом, включая совпадающие. Считаются ключи по всем записям с непустым идентификатором, даже если другие поля ошибочны. <br />
+Для платежей допускается не более 2% отклонённых записей. Ровно 2% разрешены. Пустой набор или превышение порога запрещает запись в БД. Причины отклонений сохраняются до проверки порога. <br />
+Платёж является неизменяемым событием. Повтор уже известного БД ключа разрешён только при совпадении всех семи подготовленных полей. Изменение любого значения требует ошибки и отката текущей загрузки.<br />
+
+### Договор с источником заказов
+Корень документа - объект с полями export_date и orders. orders должен быть массивом. Дата выгрузки описывает поставку и не является датой заказа. Идентификаторы заказов в корректной части предоставленных файлов не повторяются. <br />
+
+|Поле |Тип и правило |
+|---|---|
+|order_id | Непустая строка; крайние пробелы удаляются |
+|customer |Обязательный объект |
+|customer.customer_id| Непустая строка, ведущие нули сохраняются| 
+|items |Обязательный массив; пустой массив разрешён |
+|items[].line_no |Положительное целое число, уникальное внутри заказа |
+|items[].sku |Непустая строка; крайние пробелы удаляются |
+|items[].quantity |Положительное целое число |
+|items[].unit_price |Строка с целым числом или 1-2 знаками после точки. Цена > 0 и <= 9999999999.99 |
+
+Все цены указаны в EUR. Обязательные значения не могут быть null. Для unit_price удаляются крайние пробелы, проверяется формат и используется Decimal. Здесь десятичный разделитель точка: правила платёжного CSV с запятой к этому источнику не относятся.<br />
+
+#### orders.json 
+Если нарушена структура или значение любого заказа, отклоняется весь документ и не публикуется подготовленный результат. Заказ с пустым items считается корректным и даёт ноль строк позиций.<br />
+
+#### orders_stream.jsonl 
+Пустая физическая строка пропускается и учитывается отдельным счётчиком. Она не считается принятым или отклонённым заказом. <br />
+Ошибка JSON или нарушение правил заказа отклоняет всю текущую строку. Не записывается часть позиций заказа, если одна из его позиций некорректна. Для этого потока бизнес разрешает отдельные отклонения без порога 2%. Ошибки чтения или записи самого файла останавливают обработку.<br />
+
+
+## Задание 1
+! Общий запуск для заданий 1-2 и 4-6
+```
+python week_04/src/load_payments.py --help 
+python week_04/src/load_payments.py --input week_04/data/raw/payments_day1.csv
+```
+
+Подготовленные значения для 000001:
+```csv
+payment_id;amount;currency;created_at;paid_at;status;comment
+000001;125.50;EUR;2026-09-01 08:00:00+00:00;2026-09-01 08:11:00+00:00;paid;"Заказ O'Reilly; доставка ""до двери"""
+```
+
+Число физических строк CSV не равно числу записей так как для некоторых заказов может быть указан многострочный комментарий, к примеру как для payment_id = '000007'<br />
+
+## Задание 2
+### Загрузка из payments_day1.csv
+#### Файл с принятыми к загрузке записями:
+```
+week_04/data/processed/LOAD_ID/payments.jsonl
+```
+#### Файл с отклоненными записями:
+```
+week_04/data/rejected/LOAD_ID/payments.jsonl
+```
+#### Статистика запуска:
+```
+week_04/data/processed/LOAD_ID/summary_payments.jsonl
+```
+```json
+{
+  "run_id": "930582c4708c4a5e94968b787c7dbad9", 
+  "source_file": "data\\raw\\payments_day1.csv", 
+  "read": 100, 
+  "accepted": 98, 
+  "rejected": 2, 
+  "rejection_rate": "0.02", 
+  "load_allowed": true
+}
+```
+
+```sql
+select count(*) from de4_hw.payment_events
+```
+|count|
+|-----|
+|98|
+
+### Загрузка из payments_quality.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_quality.csv
+```
+#### Статистика запуска:
+```json
+{
+  "run_id": "9629fb819f054d0b86b1a34e42dedcad", 
+  "source_file": "data\\raw\\payments_quality.csv", 
+  "read": 20, 
+  "accepted": 4, 
+  "rejected": 16, 
+  "rejection_rate": "0.8", 
+  "load_allowed": false
+}
+```
+Запуск падает с ошибкой по причине превышения допустимого порога отклонений:
+```
+2026-10-18 23:21:12,050 INFO run_id=9629fb819f054d0b86b1a34e42dedcad event=load_started input=data\raw\payments_quality.csv
+2026-10-18 23:21:12,050 INFO event=csv_read_started path=data\raw\payments_quality.csv
+2026-10-18 23:21:12,051 INFO event=csv_read_completed path=data\raw\payments_quality.csv rows=20
+2026-10-18 23:21:12,051 INFO event=preparation_completed read=20 accepted=4 rejected=16
+2026-10-18 23:21:12,051 INFO event=data_prepared read=20 accepted=4 rejected=16
+2026-10-18 23:21:12,052 INFO event=save_rejected count=16 path=data\rejected\9629fb819f054d0b86b1a34e42dedcad\payments.jsonl
+2026-10-18 23:21:12,053 INFO event=save_accepted count=4 path=data\processed\9629fb819f054d0b86b1a34e42dedcad\payments.jsonl
+2026-10-18 23:21:12,054 WARNING run_id=9629fb819f054d0b86b1a34e42dedcad event=batch_rejected reason=rejection_limit read=20 rejected=16 rejection_rate=0.8 limit=0.02
+2026-10-18 23:21:12,054 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 652, in run_load
+    check_batch(raw_records, accepted, rejected, path, run_id)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 478, in check_batch
+    raise RuntimeError("Загрузка запрещена: превышена допустимая доля отклонений")
+RuntimeError: Загрузка запрещена: превышена допустимая доля отклонений
+```
+
+Две записи с ключом 900019 отклонены - несмотря на ошибку в поле amount, по договору с источником все записи с повторяющимся в рамках файла payment_id должны быть исключены из загрузки, даже если другие поля ошибочны.
+```json
+{"run_id": "9629fb819f054d0b86b1a34e42dedcad", "source_file": "data\\raw\\payments_quality.csv", "record_number": 19, "raw": {"Payment ID": "900019", "Amount": "9", "Currency": "EUR", "Created At": "2026-09-01T10:00:00+02:00", "Paid At": "2026-09-01T10:10:00+02:00", "Status": "paid", "Comment": "Обычная оплата"}, "errors": [{"field": "Payment ID", "code": "DUPLICATE_KEY", "message": "Ключ повторяется внутри загрузки"}]}
+{"run_id": "9629fb819f054d0b86b1a34e42dedcad", "source_file": "data\\raw\\payments_quality.csv", "record_number": 20, "raw": {"Payment ID": " 900019 ", "Amount": "oops", "Currency": "EUR", "Created At": "2026-09-01T10:00:00+02:00", "Paid At": "2026-09-01T10:10:00+02:00", "Status": "paid", "Comment": "Обычная оплата"}, "errors": [{"field": "Payment ID", "code": "DUPLICATE_KEY", "message": "Ключ повторяется внутри загрузки"}]}
+```
+
+## Задание 3
+### orders.json
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/orders.json
+```
+#### Файл с принятыми к загрузке записями:
+```
+week_04/data/processed/LOAD_ID/orders.csv
+```
+
+#### Проверка на fixtures/orders_invalid_structure.json
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/fixtures/orders_invalid_structure.json
+```
+```
+2026-10-18 23:42:55,161 INFO run_id=18c8d1bc9b374e789299b5f7556f3773 event=load_started input=data\raw\fixtures\orders_invalid_structure.json
+2026-10-18 23:42:55,162 INFO event=src_read_started path=data\raw\fixtures\orders_invalid_structure.json
+2026-10-18 23:42:55,162 INFO event=load_json
+2026-10-18 23:42:55,162 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\prepare_orders.py", line 323, in main
+    run_load(args.input)
+    ~~~~~~~~^^^^^^^^^^^^
+  File "...\week_04\src\prepare_orders.py", line 207, in run_load
+    order_rows = order_process(order)
+  File "...\week_04\src\prepare_orders.py", line 122, in order_process
+    items = validate_fields(raw, "items", list)
+  File "...\week_04\src\prepare_orders.py", line 66, in validate_fields
+    raise ValueError(f"Поле не может быть NULL: {fieldname}")
+ValueError: Поле не может быть NULL: items
+```
+
+### orders_stream.jsonl
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/orders_stream.jsonl
+```
+
+#### Значение items - Ключ отсутствует
+```json
+{"run_id": "ab28c93b5c9449d296969e48657e4e50", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 6, "raw_text": "{\"order_id\": \"O_BAD_MISSING\", \"customer\": {\"customer_id\": \"000050\"}}\n", "reason": "Отсутствует поле: items"}
+```
+
+#### Значение items - null
+```json
+{"run_id": "ab28c93b5c9449d296969e48657e4e50", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 7, "raw_text": "{\"order_id\": \"O_BAD_NULL\", \"customer\": {\"customer_id\": \"000051\"}, \"items\": null}\n", "reason": "Поле не может быть NULL: items"}
+```
+
+#### Значение items - ""
+```json
+{"run_id": "ab28c93b5c9449d296969e48657e4e50", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 8, "raw_text": "{\"order_id\": \"O_BAD_STRING\", \"customer\": {\"customer_id\": \"000052\"}, \"items\": \"\"}\n", "reason": "items: ожидался тип list"}
+```
+
+#### Значение items - []
+Заказ отсутствует в rejected, записано 0 записей
+
+#### Статистика запуска:
+```json
+{
+  "run_id": "ab28c93b5c9449d296969e48657e4e50",
+  "source_file": "data\\raw\\orders_stream.jsonl",
+  "orders_read": 9,
+  "orders_accepted": 5,
+  "orders_rejected": 4,
+  "blank_lines": 1,
+  "items_written": 6,
+  "units": 13,
+  "total_amount": "140.10"
+}
+```
+
+## Задание 4 (продолжение заданий 1-2)
+#### Результаты загрузки через batch
+```
+2026-10-18 23:08:23,736 INFO run_id=930582c4708c4a5e94968b787c7dbad9 event=load_started input=data\raw\payments_day1.csv
+2026-10-18 23:08:23,736 INFO event=csv_read_started path=data\raw\payments_day1.csv
+2026-10-18 23:08:23,737 INFO event=csv_read_completed path=data\raw\payments_day1.csv rows=100
+2026-10-18 23:08:23,738 INFO event=preparation_completed read=100 accepted=98 rejected=2
+2026-10-18 23:08:23,738 INFO event=data_prepared read=100 accepted=98 rejected=2
+2026-10-18 23:08:23,739 INFO event=save_rejected count=2 path=data\rejected\930582c4708c4a5e94968b787c7dbad9\payments.jsonl
+2026-10-18 23:08:23,741 INFO event=save_accepted count=98 path=data\processed\930582c4708c4a5e94968b787c7dbad9\payments.jsonl
+2026-10-18 23:08:23,787 INFO event=db_connected database=de_course user=de_student
+2026-10-18 23:08:23,807 INFO event=batch_completed rows=98
+2026-10-18 23:08:23,807 INFO event=buffer_loaded rows=98 method=batch
+2026-10-18 23:08:23,812 INFO event=db_transaction_commited inserted=98
+2026-10-18 23:08:23,812 INFO event=load_completed result={'run_id': '930582c4708c4a5e94968b787c7dbad9', 'status': 'SUCCESS_WITH_REJECTS', 'read': 100, 'accepted': 98, 'rejected': 2, 'inserted': 98}
+```
+
+```sql
+select count(*) as rows_cnt, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+
+|rows_cnt|sum_amount|
+|--------|----------|
+|98|5077.50|
+
+#### Результаты загрузки через copy
+is_batch = False<br />
+Результаты запуска (таблица предварительно очищена):
+```
+2026-10-18 23:59:52,677 INFO run_id=3edf198ce9614bafb5be45c7c5b093cd event=load_started input=data\raw\payments_day1.csv
+2026-10-18 23:59:52,677 INFO event=csv_read_started path=data\raw\payments_day1.csv
+2026-10-18 23:59:52,678 INFO event=csv_read_completed path=data\raw\payments_day1.csv rows=100
+2026-10-18 23:59:52,679 INFO event=preparation_completed read=100 accepted=98 rejected=2
+2026-10-18 23:59:52,679 INFO event=data_prepared read=100 accepted=98 rejected=2
+2026-10-18 23:59:52,680 INFO event=save_rejected count=2 path=data\rejected\3edf198ce9614bafb5be45c7c5b093cd\payments.jsonl
+2026-10-18 23:59:52,681 INFO event=save_accepted count=98 path=data\processed\3edf198ce9614bafb5be45c7c5b093cd\payments.jsonl
+2026-10-18 23:59:52,728 INFO event=db_connected database=de_course user=de_student
+2026-10-18 23:59:52,735 INFO event=copy_completed rows=98
+2026-10-18 23:59:52,735 INFO event=buffer_loaded rows=98 method=copy
+2026-10-18 23:59:52,750 INFO event=db_transaction_commited inserted=98
+2026-10-18 23:59:52,750 INFO event=load_completed result={'run_id': '3edf198ce9614bafb5be45c7c5b093cd', 'status': 'SUCCESS_WITH_REJECTS', 'read': 100, 'accepted': 98, 'rejected': 2, 'inserted': 98}
+```
+
+```sql
+select count(*) as rows_cnt, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+
+|rows_cnt|sum_amount|
+|--------|----------|
+|98|5077.5|
+
+Сохранность комментария с апострофом и многострочного комментария:
+```sql
+select payment_id, comment from de4_hw.payment_events where payment_id in ('000001', '000007')
+```
+|payment_id|comment|
+|----------|-------|
+|000001|Заказ O'Reilly; доставка "до двери"|
+|000007|Первая часть комментария<br>Вторая часть комментария|
+
+
+## Задание 5
+### Повторный запуск payments_day1.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_day1.csv
+```
+Допущено 98 записей, загружено в базу 0:
+```
+2026-10-19 00:10:44,399 INFO event=load_completed result={'run_id': 'b01d594674de41a2bdae8efd6a4d015a', 'status': 'SUCCESS_WITH_REJECTS', 'read': 100, 'accepted': 98, 'rejected': 2, 'inserted': 0}
+```
+
+### payments_delta.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_delta.csv
+```
+Статистика расчета
+```
+2026-10-19 00:12:48,246 INFO event=load_completed result={'run_id': '6362b34c1e7540b19edeadf848ddd11a', 'status': 'SUCCESS', 'read': 5, 'accepted': 5, 'rejected': 0, 'inserted': 3}
+```
+```sql
+select count(*) as rows_cnt, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|sum_amount|
+|--------|----------|
+|101|5333.01|
+
+### payments_conflict.csv
+Состояние до попытки загрузки для платежей '000002', '000901'
+```sql
+select payment_id, paid_at, amount from de4_hw.payment_events where payment_id in ('000002', '000901')
+```
+|payment_id|paid_at|amount|
+|----------|-------|------|
+|000002|2026-09-01 10:12:00.000 +0200|80.00|
+
+Запуск конфликтного файла - откат транзакции
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_conflict.csv
+```
+```2026-10-19 00:16:20,365 INFO run_id=e53595fee70b4bdeaa57f65f1b0c6668 event=load_started input=data\raw\payments_conflict.csv
+2026-10-19 00:16:20,365 INFO event=csv_read_started path=data\raw\payments_conflict.csv
+2026-10-19 00:16:20,365 INFO event=csv_read_completed path=data\raw\payments_conflict.csv rows=2
+2026-10-19 00:16:20,365 INFO event=preparation_completed read=2 accepted=2 rejected=0
+2026-10-19 00:16:20,366 INFO event=data_prepared read=2 accepted=2 rejected=0
+2026-10-19 00:16:20,366 INFO event=save_rejected count=0 path=data\rejected\e53595fee70b4bdeaa57f65f1b0c6668\payments.jsonl
+2026-10-19 00:16:20,367 INFO event=save_accepted count=2 path=data\processed\e53595fee70b4bdeaa57f65f1b0c6668\payments.jsonl
+2026-10-19 00:16:20,417 INFO event=db_connected database=de_course user=de_student
+2026-10-19 00:16:20,423 INFO event=copy_completed rows=2
+2026-10-19 00:16:20,423 INFO event=buffer_loaded rows=2 method=copy
+2026-10-19 00:16:20,434 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 654, in run_load
+    inserted = load_records(accepted)
+  File "...\week_04\src\load_payments.py", line 619, in load_records
+    check_loaded(cur, expected)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 552, in check_loaded
+    raise ValueError(f"Несовпадение платежа: {row[0]}")
+ValueError: Несовпадение платежа: 000002```
+
+Состояние после попытки загрузки для платежей '000002', '000901'
+```sql
+select payment_id, paid_at, amount from de4_hw.payment_events where payment_id in ('000002', '000901')
+```
+|payment_id|paid_at|amount|
+|----------|-------|------|
+|000002|2026-09-01 10:12:00.000 +0200|80.00|
+
+>Почему ON CONFLICT DO NOTHING само по себе недостаточно? <br />
+
+В загрузчике конфликт определяется по payment_id - предотвращается вставка еще одной строки с существующим ключом, но не проверяется равенство остальных полей события, поэтому необходимо также сравнивать атрибуты для того, чтобы убедиться, что это новая запись.
+
+>Почему проверка только количества и суммы пропустила бы изменение времени в конфликтном файле? <br />
+
+Количества строк и сумма amount не зависит от значений времени, тогда как время created_at и paid_at также являются описательными атрибутами в строке и требуют проверки
+
+>Чем повтор ключа внутри одного источника отличается от повторной доставки уже загруженного события?<br />
+
+Повтор ключа внутри одного источника - нарушение правила уникальности источника, по требованиям отклоняются все записи с повторяющимся ключом. <br />
+Повторная доставка уже загруженного события - ситуация между разными запусками, в новом файле приходит строка, которая уже есть в базе, повторная вставка не производится.
+
+## Задание 6
+### Ошибки входного файла
+#### Нет заголовка, обработка не начинается
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/empty.csv
+```
+```
+2026-10-19 00:30:58,663 INFO run_id=f9f09abcea1f426d9ccaf3c704cf2dcf event=load_started input=data\raw\fixtures\empty.csv
+2026-10-19 00:30:58,664 INFO event=csv_read_started path=data\raw\fixtures\empty.csv
+2026-10-19 00:30:58,664 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 316, in read_records
+    validate_header(reader.fieldnames)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 144, in validate_header
+    raise ValueError("Файл пуст: заголовок отсутствует")
+ValueError: Файл пуст: заголовок отсутствует
+```
+
+#### Заголовок верен, но записей нет; пустая загрузка запрещена
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/header_only.csv
+```
+```
+2026-10-19 00:31:49,777 INFO run_id=8a0f73cfc88c4c6ba7d9a31c33c2b6de event=load_started input=data\raw\fixtures\header_only.csv
+2026-10-19 00:31:49,777 INFO event=csv_read_started path=data\raw\fixtures\header_only.csv
+2026-10-19 00:31:49,777 INFO event=csv_read_completed path=data\raw\fixtures\header_only.csv rows=0
+2026-10-19 00:31:49,778 INFO event=preparation_completed read=0 accepted=0 rejected=0
+2026-10-19 00:31:49,778 INFO event=data_prepared read=0 accepted=0 rejected=0
+2026-10-19 00:31:49,778 INFO event=save_rejected count=0 path=data\rejected\8a0f73cfc88c4c6ba7d9a31c33c2b6de\payments.jsonl
+2026-10-19 00:31:49,779 INFO event=save_accepted count=0 path=data\processed\8a0f73cfc88c4c6ba7d9a31c33c2b6de\payments.jsonl
+2026-10-19 00:31:49,779 WARNING run_id=8a0f73cfc88c4c6ba7d9a31c33c2b6de event=batch_rejected reason=empty_csv read=0
+2026-10-19 00:31:49,779 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 652, in run_load
+    check_batch(raw_records, accepted, rejected, path, run_id)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 466, in check_batch
+    raise RuntimeError("Загрузка запрещена: в CSV нет данных")
+RuntimeError: Загрузка запрещена: в CSV нет данных
+```
+#### Не хватает обязательной колонки
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/missing_column.csv
+```
+```
+2026-10-19 00:31:55,328 INFO run_id=8fbda650e7494820ae615e82460b3dc4 event=load_started input=data\raw\fixtures\missing_column.csv
+2026-10-19 00:31:55,328 INFO event=csv_read_started path=data\raw\fixtures\missing_column.csv
+2026-10-19 00:31:55,329 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 316, in read_records
+    validate_header(reader.fieldnames)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 146, in validate_header
+    raise ValueError(f"Неверный заголовок: {fieldnames}")
+ValueError: Неверный заголовок: ['Payment ID', 'Amount', 'Created At', 'Paid At', 'Status', 'Comment']
+```
+
+#### Повторяющееся имя колонки
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/duplicate_column.csv
+```
+```
+2026-10-19 00:32:01,287 INFO run_id=b0cba6f31f3f4451beb65a8e512c2e4f event=load_started input=data\raw\fixtures\duplicate_column.csv
+2026-10-19 00:32:01,287 INFO event=csv_read_started path=data\raw\fixtures\duplicate_column.csv
+2026-10-19 00:32:01,287 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 316, in read_records
+    validate_header(reader.fieldnames)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 146, in validate_header
+    raise ValueError(f"Неверный заголовок: {fieldnames}")
+ValueError: Неверный заголовок: ['Payment ID', 'Amount', 'Currency', 'Created At', 'Paid At', 'Status', 'Comment', 'Amount']
+```
+
+#### Число полей записи не соответствует заголовку - меньше полей
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/short_row.csv
+```
+```
+2026-10-19 00:32:06,062 INFO run_id=8242f6ab17674e438251a7a02942b311 event=load_started input=data\raw\fixtures\short_row.csv
+2026-10-19 00:32:06,063 INFO event=csv_read_started path=data\raw\fixtures\short_row.csv
+2026-10-19 00:32:06,063 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 319, in read_records
+    validate_row_shape(row)
+    ~~~~~~~~~~~~~~~~~~^^^^^
+  File "...\week_04\src\load_payments.py", line 153, in validate_row_shape
+    raise ValueError(
+        f"В записи отсутствует поле: {name}"
+    )
+ValueError: В записи отсутствует поле: Comment
+```
+#### Число полей записи не соответствует заголовку - больше полей
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/extra_field.csv
+```
+```
+2026-10-19 00:32:10,868 INFO run_id=adba96fd7e1d4bd08158798ffc895ea1 event=load_started input=data\raw\fixtures\extra_field.csv
+2026-10-19 00:32:10,868 INFO event=csv_read_started path=data\raw\fixtures\extra_field.csv
+2026-10-19 00:32:10,869 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 319, in read_records
+    validate_row_shape(row)
+    ~~~~~~~~~~~~~~~~~~^^^^^
+  File "...\week_04\src\load_payments.py", line 150, in validate_row_shape
+    raise ValueError(f"Лишние поля: {row[None]}")
+ValueError: Лишние поля: ['лишнее поле']
+```
+#### Повреждены кавычки; нельзя надёжно продолжить CSV
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/broken_quotes.csv
+```
+```
+2026-10-19 00:40:03,590 INFO run_id=035f034c045c4d44a87ad3e000cb9592 event=load_started input=data\raw\fixtures\broken_quotes.csv
+2026-10-19 00:40:03,590 INFO event=csv_read_started path=data\raw\fixtures\broken_quotes.csv
+2026-10-19 00:40:03,591 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 318, in read_records
+    for row in reader:
+               ^^^^^^
+  File "C:\Users\elo01\AppData\Local\Python\pythoncore-3.13-64\Lib\csv.py", line 178, in __next__
+    row = next(self.reader)
+_csv.Error: unexpected end of data
+```
+#### Ошибка декодирования файла
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/invalid_utf8.csv
+```
+```
+2026-10-19 00:32:22,542 INFO run_id=37edbbeb33c5417c88d36378b5ad01a1 event=load_started input=data\raw\fixtures\invalid_utf8.csv
+2026-10-19 00:32:22,542 INFO event=csv_read_started path=data\raw\fixtures\invalid_utf8.csv
+2026-10-19 00:32:22,543 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 316, in read_records
+    validate_header(reader.fieldnames)
+                    ^^^^^^^^^^^^^^^^^
+  File "C:\Users\elo01\AppData\Local\Python\pythoncore-3.13-64\Lib\csv.py", line 164, in fieldnames
+    self._fieldnames = next(self.reader)
+                       ~~~~^^^^^^^^^^^^^
+  File "<frozen codecs>", line 325, in decode
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 61: invalid start byte
+```
+#### Несуществующий путь - Ошибка открытия входного файла
+```
+python week_04/src/load_payments.py --input week_04/data/raw/invalid_path.csv
+```
+```
+2026-10-19 00:32:30,302 INFO run_id=bf0a0e6767514679a1f672bb7c65f2de event=load_started input=data\raw\invalid_path.csv
+2026-10-19 00:32:30,302 INFO event=csv_read_started path=data\raw\invalid_path.csv
+2026-10-19 00:32:30,302 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 637, in run_load
+    raw_records = read_records(path)
+  File "...\week_04\src\load_payments.py", line 305, in read_records
+    raise FileNotFoundError(f"Исходный CSV-файл не найден: {path}")
+FileNotFoundError: Исходный CSV-файл не найден: ...\week_04\data\raw\invalid_path.csv
+```
+#### Превышение порога отклонений после сохранения причин
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_quality.csv
+```
+```
+2026-10-19 00:32:50,124 INFO run_id=8a17ba29efeb477e9accb783ce98a8dd event=load_started input=data\raw\payments_quality.csv
+2026-10-19 00:32:50,124 INFO event=csv_read_started path=data\raw\payments_quality.csv
+2026-10-19 00:32:50,124 INFO event=csv_read_completed path=data\raw\payments_quality.csv rows=20
+2026-10-19 00:32:50,125 INFO event=preparation_completed read=20 accepted=4 rejected=16
+2026-10-19 00:32:50,125 INFO event=data_prepared read=20 accepted=4 rejected=16
+2026-10-19 00:32:50,126 INFO event=save_rejected count=16 path=data\rejected\8a17ba29efeb477e9accb783ce98a8dd\payments.jsonl
+2026-10-19 00:32:50,127 INFO event=save_accepted count=4 path=data\processed\8a17ba29efeb477e9accb783ce98a8dd\payments.jsonl
+2026-10-19 00:32:50,127 WARNING run_id=8a17ba29efeb477e9accb783ce98a8dd event=batch_rejected reason=rejection_limit read=20 rejected=16 rejection_rate=0.8 limit=0.02
+2026-10-19 00:32:50,127 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 652, in run_load
+    check_batch(raw_records, accepted, rejected, path, run_id)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "...\week_04\src\load_payments.py", line 478, in check_batch
+    raise RuntimeError("Загрузка запрещена: превышена допустимая доля отклонений")
+RuntimeError: Загрузка запрещена: превышена допустимая доля отклонений
+```
+
+### Контрольный сбой внутри транзакции
+```
+python week_04/src/load_payments_rollback.py --input week_04/data/raw/payments_rollback.csv
+```
+```
+2026-10-19 00:41:56,109 INFO run_id=c1cfafa3fb7941b2b93037f7a5bd7f1b event=load_started input=data\raw\payments_rollback.csv
+2026-10-19 00:41:56,109 INFO event=csv_read_started path=data\raw\payments_rollback.csv
+2026-10-19 00:41:56,109 INFO event=csv_read_completed path=data\raw\payments_rollback.csv rows=3
+2026-10-19 00:41:56,110 INFO event=preparation_completed read=3 accepted=3 rejected=0
+2026-10-19 00:41:56,110 INFO event=data_prepared read=3 accepted=3 rejected=0
+2026-10-19 00:41:56,110 INFO event=save_rejected count=0 path=data\rejected\c1cfafa3fb7941b2b93037f7a5bd7f1b\payments.jsonl
+2026-10-19 00:41:56,111 INFO event=save_accepted count=3 path=data\processed\c1cfafa3fb7941b2b93037f7a5bd7f1b\payments.jsonl
+2026-10-19 00:41:56,162 INFO event=db_connected database=de_course user=de_student
+2026-10-19 00:41:56,168 INFO event=batch_completed rows=3
+2026-10-19 00:41:56,168 INFO event=buffer_loaded rows=3 method=batch
+2026-10-19 00:41:56,170 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments_rollback.py", line 683, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments_rollback.py", line 658, in run_load
+    inserted = load_records(accepted)
+  File "...\week_04\src\load_payments_rollback.py", line 620, in load_records
+    raise RuntimeError("Контрольный сбой после INSERT, до COMMIT")
+RuntimeError: Контрольный сбой после INSERT, до COMMIT
+```
+```sql
+select payment_id from de4_hw.payment_events where payment_id like '0003%' 
+--0 записей
+```
+
+#### Повторный прогон без сбоя
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_rollback.csv
+```
+```sql
+select payment_id from de4_hw.payment_events where payment_id like '0003%' 
+--3 новых записи
+```
+|payment_id|
+|----------|
+|000301|
+|000302|
+|000303|
+
+```sql
+select count(*) as rows_cnt, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|sum_amount|
+|--------|----------|
+|104|5393.01|
+
+
+### Ошибка подключения
+```
+$env:PGDATABASE = "wrong_dbname"
+python week_04/src/load_payments.py --input week_04/data/raw/payments_rollback.csv
+```
+```
+2026-10-19 00:47:23,350 INFO run_id=9161390513f9426598ecaaa259f55289 event=load_started input=data\raw\payments_rollback.csv
+2026-10-19 00:47:23,350 INFO event=csv_read_started path=data\raw\payments_rollback.csv
+2026-10-19 00:47:23,350 INFO event=csv_read_completed path=data\raw\payments_rollback.csv rows=3
+2026-10-19 00:47:23,351 INFO event=preparation_completed read=3 accepted=3 rejected=0
+2026-10-19 00:47:23,351 INFO event=data_prepared read=3 accepted=3 rejected=0
+2026-10-19 00:47:23,351 INFO event=save_rejected count=0 path=data\rejected\9161390513f9426598ecaaa259f55289\payments.jsonl
+2026-10-19 00:47:23,352 INFO event=save_accepted count=3 path=data\processed\9161390513f9426598ecaaa259f55289\payments.jsonl
+2026-10-19 00:47:23,407 ERROR event=load_failed
+Traceback (most recent call last):
+  File "...\week_04\src\load_payments.py", line 679, in main
+    result = run_load(args.input)
+  File "...\week_04\src\load_payments.py", line 654, in run_load
+    inserted = load_records(accepted)
+  File "...\week_04\src\load_payments.py", line 581, in load_records
+    with psycopg.connect(
+         ~~~~~~~~~~~~~~~^
+        **conn_params,
+        ^^^^^^^^^^^^^^
+        password=password,
+        ^^^^^^^^^^^^^^^^^^
+    ) as conn:
+    ^
+  File "...\.venv\Lib\site-packages\psycopg\connection.py", line 122, in connect
+    raise last_ex.with_traceback(None)
+psycopg.OperationalError: connection failed: connection to server at "...", port ... failed: �����:  ���� ������ "wrong_dbname" �� ����������
+```
