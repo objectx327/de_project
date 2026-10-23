@@ -1,0 +1,6 @@
+{
+  "run_id": "cc859613cd9d4f45afea43d53acac667",
+  "source_file": "data\\raw\\fixtures\\orders_invalid_structure.json",
+  "status": "FAILED",
+  "error": "Поле не может быть NULL: items"
+}

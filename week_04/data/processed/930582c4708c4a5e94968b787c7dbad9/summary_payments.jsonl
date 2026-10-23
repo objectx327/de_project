@@ -1,1 +1,0 @@
-{"run_id": "930582c4708c4a5e94968b787c7dbad9", "source_file": "data\\raw\\payments_day1.csv", "read": 100, "accepted": 98, "rejected": 2, "rejection_rate": "0.02", "load_allowed": true}

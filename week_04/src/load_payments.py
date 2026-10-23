@@ -22,17 +22,18 @@ data_dir = base_dir / "data"
 ######
 #Настройка логирования
 ####
-log_dir = base_dir / "data" / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    filename=log_dir / "load.log",
-    encoding="utf-8",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
 logger = logging.getLogger(__name__)
+
+def configure_logging():
+    log_dir = base_dir / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.basicConfig(
+        filename=log_dir / "load.log",
+        encoding="utf-8",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
 #Режим загрузки в буфер:
 # Для copy - False
@@ -384,7 +385,7 @@ def save_rejected(rejected, path, run_id):
 
 #Сохранение принятых записей (без загрузки в бд)
 def save_accepted(accepted, run_id):
-    target_accepted = data_dir / "processed" / run_id / "payments.jsonl"
+    target_accepted = data_dir / "processed" / run_id / "payments.csv"
     #Допущенные записи
     target_accepted.parent.mkdir(parents=True, exist_ok=True) 
 
@@ -407,9 +408,8 @@ def save_accepted(accepted, run_id):
 
     return target_accepted
 
-#Сохранение статистики обработки
+#Подсчет результатов и допуск к загрузке, статистика считаетя в run_load()
 def check_batch(raw_records, accepted, rejected, path, run_id):
-    #Подсчет результатов и допуск к загрузке
     read_count = len(raw_records) 
     accepted_count = len(accepted) 
     rejected_count = len(rejected) 
@@ -425,25 +425,6 @@ def check_batch(raw_records, accepted, rejected, path, run_id):
         and read_count > 0
         and Decimal(rejected_count) <= Decimal(read_count) * rejection_limit
     )
-
-    summary = {
-        "run_id": run_id,
-        "source_file": str(Path(path).relative_to(base_dir)),
-        "read": read_count,
-        "accepted": accepted_count,
-        "rejected": rejected_count,
-        "rejection_rate": (
-            str(rejection_rate)
-            if rejection_rate is not None
-            else None
-        ),
-        "load_allowed": load_allowed,
-    }
-
-    target_summary = data_dir / "processed" / run_id / "summary_payments.jsonl"
-    target_summary.parent.mkdir(parents=True, exist_ok=True)
-    with target_summary.open("x", encoding="utf-8") as file:
-        json.dump(summary, file, ensure_ascii=False, allow_nan=False)
 
     if read_count != accepted_count + rejected_count: 
         logger.warning(
@@ -476,8 +457,6 @@ def check_batch(raw_records, accepted, rejected, path, run_id):
             rejection_limit,
         )
         raise RuntimeError("Загрузка запрещена: превышена допустимая доля отклонений")
-    
-    return target_summary
 
 #####
 #Подготовка к загрузке в базу
@@ -633,38 +612,99 @@ def run_load(path):
         str(Path(path).relative_to(base_dir)),
     )
 
-    raw_records = read_records(path)
-    accepted, rejected = prepare_records(raw_records)
-
-    logger.info(
-        "event=data_prepared "
-        "read=%d accepted=%d rejected=%d",
-        len(raw_records),
-        len(accepted),
-        len(rejected),
-    )
-
-    save_rejected(rejected, path, run_id)
-    save_accepted(accepted, run_id)
-
-
-    check_batch(raw_records, accepted, rejected, path, run_id)
-
-    inserted = load_records(accepted)
-    status = "SUCCESS"
-    if rejected: 
-        status = "SUCCESS_WITH_REJECTS"
-
-    result = { 
-        "run_id": run_id, 
-        "status": status, 
-        "read": len(raw_records), 
-        "accepted": len(accepted), 
-        "rejected": len(rejected), 
-        "inserted": inserted, 
+    summary = {
+        "run_id": run_id,
+        "source_file": str(Path(path).relative_to(base_dir)),
+        "status": "FAILED",
+        "source_read_complete": False,
+        "read": None,
+        "accepted": None,
+        "rejected": None,
+        "rejection_rate": None,
+        "load_allowed": None,
+        "accepted_amount": None,
+        "inserted": 0,
     }
 
-    return result
+    try:
+        raw_records = read_records(path)
+        summary["source_read_complete"] = True
+        summary["read"] = len(raw_records)
+
+        accepted, rejected = prepare_records(raw_records)
+        read_count = len(raw_records) 
+        accepted_count = len(accepted) 
+        rejected_count = len(rejected) 
+
+        rejection_rate = (
+            Decimal(rejected_count) / Decimal(read_count)
+            if read_count > 0
+            else None
+        )
+
+        load_allowed = (
+            read_count == accepted_count + rejected_count
+            and read_count > 0
+            and Decimal(rejected_count) <= Decimal(read_count) * rejection_limit
+        )
+        
+        accepted_amount = Decimal("0.00")
+        for row in accepted:
+            accepted_amount += Decimal(row["amount"])
+
+        summary["accepted"] = accepted_count
+        summary["rejected"] = rejected_count
+        summary["rejection_rate"] = (
+            str(rejection_rate)
+            if rejection_rate is not None
+            else None
+        )
+        summary["load_allowed"] = load_allowed
+        summary["accepted_amount"] = str(accepted_amount)
+
+        logger.info(
+            "event=data_prepared "
+            "read=%d accepted=%d rejected=%d",
+            len(raw_records),
+            len(accepted),
+            len(rejected),
+        )
+
+        save_rejected(rejected, path, run_id)
+        save_accepted(accepted, run_id)
+
+
+        check_batch(raw_records, accepted, rejected, path, run_id)
+
+        inserted = load_records(accepted)
+        summary["inserted"] = inserted
+        
+        status = "SUCCESS"
+        if rejected: 
+            status = "SUCCESS_WITH_REJECTS"
+        summary["status"] = status
+
+    except Exception as error:
+        summary["status"] = "FAILED"
+        summary["error"] = str(error)
+
+        target_summary = data_dir / "processed" / run_id / "summary_payments.jsonl"
+        target_summary.parent.mkdir(parents=True, exist_ok=True)
+        with target_summary.open("x", encoding="utf-8") as file:
+            json.dump(summary, file, ensure_ascii=False, allow_nan=False)
+        raise
+
+    target_summary = data_dir / "processed" / run_id / "summary_payments.jsonl"
+    target_summary.parent.mkdir(parents=True, exist_ok=True)
+    with target_summary.open("x", encoding="utf-8") as file:
+        json.dump(summary, file, ensure_ascii=False, allow_nan=False)
+
+    logger.info(
+        "event=save_summary status=%s path=%s",
+        summary["status"],
+        str(Path(target_summary).relative_to(base_dir)),
+    )
+    return summary
 
 ########
 #Основная часть кода
@@ -673,6 +713,8 @@ def main():
     parser = argparse.ArgumentParser() 
     parser.add_argument("--input", type=Path, required=True, help = "Путь к CSV") 
     args = parser.parse_args() 
+
+    configure_logging()
 
     try: 
         result = run_load(args.input) 

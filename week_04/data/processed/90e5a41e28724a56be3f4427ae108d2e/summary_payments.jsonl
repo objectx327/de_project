@@ -1,0 +1,1 @@
+{"run_id": "90e5a41e28724a56be3f4427ae108d2e", "source_file": "data\\raw\\invalid_path.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "Исходный CSV-файл не найден: ...\\week_04\\data\\raw\\invalid_path.csv"}

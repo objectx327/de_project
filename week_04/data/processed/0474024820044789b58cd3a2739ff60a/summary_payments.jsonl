@@ -1,0 +1,1 @@
+{"run_id": "0474024820044789b58cd3a2739ff60a", "source_file": "data\\raw\\payments_quality.csv", "status": "FAILED", "source_read_complete": true, "read": 20, "accepted": 4, "rejected": 16, "rejection_rate": "0.8", "load_allowed": false, "accepted_amount": "10000000135.50", "inserted": 0, "error": "Загрузка запрещена: превышена допустимая доля отклонений"}

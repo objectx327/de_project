@@ -1,0 +1,1 @@
+{"run_id": "6227350f9a094baeb48a7360adee1db3", "source_file": "data\\raw\\fixtures\\broken_quotes.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "unexpected end of data"}

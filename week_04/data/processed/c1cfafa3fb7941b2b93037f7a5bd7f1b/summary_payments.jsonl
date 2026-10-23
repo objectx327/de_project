@@ -1,1 +1,0 @@
-{"run_id": "c1cfafa3fb7941b2b93037f7a5bd7f1b", "source_file": "data\\raw\\payments_rollback.csv", "read": 3, "accepted": 3, "rejected": 0, "rejection_rate": "0", "load_allowed": true}

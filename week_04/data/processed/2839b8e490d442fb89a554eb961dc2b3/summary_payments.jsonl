@@ -1,0 +1,1 @@
+{"run_id": "2839b8e490d442fb89a554eb961dc2b3", "source_file": "data\\raw\\payments_delta.csv", "status": "SUCCESS", "source_read_complete": true, "read": 5, "accepted": 5, "rejected": 0, "rejection_rate": "0", "load_allowed": true, "accepted_amount": "388.26", "inserted": 3}

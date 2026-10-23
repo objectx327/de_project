@@ -1,0 +1,12 @@
+{
+  "run_id": "8329aef949424aec941c1b558c780474",
+  "source_file": "data\\raw\\orders_stream.jsonl",
+  "status": "SUCCESS_WITH_REJECTS",
+  "orders_read": 9,
+  "orders_accepted": 5,
+  "orders_rejected": 4,
+  "blank_lines": 1,
+  "items_written": 6,
+  "units": 13,
+  "total_amount": "140.10"
+}

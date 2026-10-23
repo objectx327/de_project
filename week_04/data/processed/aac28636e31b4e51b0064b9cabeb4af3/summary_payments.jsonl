@@ -1,0 +1,1 @@
+{"run_id": "aac28636e31b4e51b0064b9cabeb4af3", "source_file": "data\\raw\\fixtures\\empty.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "Файл пуст: заголовок отсутствует"}

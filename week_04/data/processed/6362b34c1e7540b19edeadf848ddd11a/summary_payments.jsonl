@@ -1,1 +1,0 @@
-{"run_id": "6362b34c1e7540b19edeadf848ddd11a", "source_file": "data\\raw\\payments_delta.csv", "read": 5, "accepted": 5, "rejected": 0, "rejection_rate": "0", "load_allowed": true}
