@@ -1,0 +1,1 @@
+{"run_id": "29c0cb79f5654c09974f9999ca90d066", "source_file": "data\\raw\\fixtures\\header_only.csv", "status": "FAILED", "source_read_complete": true, "read": 0, "accepted": 0, "rejected": 0, "rejection_rate": null, "load_allowed": false, "accepted_amount": "0.00", "inserted": 0, "error": "Загрузка запрещена: в CSV нет данных"}

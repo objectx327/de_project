@@ -1121,3 +1121,743 @@ de3_src.payments
 Поведение 0/null: Если записи нет, quantity_on_hand - null<br />
 Форма хранения: представление<br />
 Правило обновления: при обращении к view данные пересчитываются из фактов<br />
+
+
+
+# Неделя 4 - Python для DE-задач
+## Скрипты
+### Загрузка платежей:
+```
+week_04/src/load_payments.py
+```
+
+### Загрузка платежей (контрольный сбой внутри транзакции)
+```
+week_04/src/load_payments_rollback.py
+```
+
+### Обработка заказов
+```
+week_04/src/prepare_orders.py
+```
+
+### Подготовка БД
+```
+week_04/sql/00_setup.sql
+```
+
+### Названия переменных окружения
+```
+$env:PGHOST = "***"
+$env:PGPORT = "***"
+$env:PGDATABASE = "***"
+$env:PGUSER = "***"
+```
+### Проверки данных
+```
+week_04/sql/checks.sql
+```
+
+## Правила источников
+### Договор с источником платежей
+Одна запись CSV - один состоявшийся платёж. Кодировка UTF-8 без BOM, разделитель точка с запятой, символ кавычек ". Перенос строки внутри комментария допустим. Порядок колонок может отличаться. <br />
+Заголовок должен содержать ровно семь указанных ниже уникальных имён. Отсутствующее, дополнительное или повторяющееся имя, другой регистр и пробелы в имени колонки считаются ошибкой файла. <br />
+
+| Исходное поле | Поле результата | Правило |
+|-----|---|---|
+|Payment ID | payment_id | Непустая строка после strip(). Ведущие нули сохраняются |
+|Amount | amount | Decimal. Целое или 1-2 знака после запятой. Значение > 0 и <= 9999999999.99 |
+|Currency | currency | Убрать крайние пробелы, привести к верхнему регистру. Допустимо только EUR |
+| Created At | created_at | Момент создания платежа: ISO 8601 с явным смещением от UTC |
+|Paid At |paid_at |Момент оплаты в том же формате. Не раньше created_at |
+|Status |status |После strip() и casefold(): paid или оплачен. Оба значения преобразуются в paid |
+|Comment |comment |Строка, в том числе пустая. Сохранить содержимое без изменений |
+
+Все значения, кроме комментария, обязательны. В сумме разрешены только цифры и необязательная десятичная запятая: без знака, пробелов внутри числа, разделителей тысяч, экспоненты и обозначения валюты. Точка в сумме этого CSV недопустима. Лишние десятичные знаки отклоняются, округлять их нельзя. <br />
+При преобразовании сумм убираются только крайние пробелы. Моменты времени переводятся в UTC. Не подставляется текущая дата, ноль или иной статус вместо ошибочного значения. 
+
+#### Повторы и допуск к загрузке <br />
+Если очищенный Payment ID встречается в файле несколько раз, отклоняются все записи с этим ключом, включая совпадающие. Считаются ключи по всем записям с непустым идентификатором, даже если другие поля ошибочны. <br />
+Для платежей допускается не более 2% отклонённых записей. Ровно 2% разрешены. Пустой набор или превышение порога запрещает запись в БД. Причины отклонений сохраняются до проверки порога. <br />
+Платёж является неизменяемым событием. Повтор уже известного БД ключа разрешён только при совпадении всех семи подготовленных полей. Изменение любого значения требует ошибки и отката текущей загрузки.<br />
+
+### Договор с источником заказов
+Корень документа - объект с полями export_date и orders. orders должен быть массивом. Дата выгрузки описывает поставку и не является датой заказа. Идентификаторы заказов в корректной части предоставленных файлов не повторяются. <br />
+
+|Поле |Тип и правило |
+|---|---|
+|order_id | Непустая строка; крайние пробелы удаляются |
+|customer |Обязательный объект |
+|customer.customer_id| Непустая строка, ведущие нули сохраняются| 
+|items |Обязательный массив; пустой массив разрешён |
+|items[].line_no |Положительное целое число, уникальное внутри заказа |
+|items[].sku |Непустая строка; крайние пробелы удаляются |
+|items[].quantity |Положительное целое число |
+|items[].unit_price |Строка с целым числом или 1-2 знаками после точки. Цена > 0 и <= 9999999999.99 |
+
+Все цены указаны в EUR. Обязательные значения не могут быть null. Для unit_price удаляются крайние пробелы, проверяется формат и используется Decimal. Здесь десятичный разделитель точка: правила платёжного CSV с запятой к этому источнику не относятся.<br />
+
+#### orders.json 
+Если нарушена структура или значение любого заказа, отклоняется весь документ и не публикуется подготовленный результат. Заказ с пустым items считается корректным и даёт ноль строк позиций.<br />
+
+#### orders_stream.jsonl 
+Пустая физическая строка пропускается и учитывается отдельным счётчиком. Она не считается принятым или отклонённым заказом. <br />
+Ошибка JSON или нарушение правил заказа отклоняет всю текущую строку. Не записывается часть позиций заказа, если одна из его позиций некорректна. Для этого потока бизнес разрешает отдельные отклонения без порога 2%. Ошибки чтения или записи самого файла останавливают обработку.<br />
+
+
+## Задание 1
+! Общий запуск для заданий 1-2 и 4-6
+```
+python week_04/src/load_payments.py --help 
+python week_04/src/load_payments.py --input week_04/data/raw/payments_day1.csv
+```
+
+Подготовленные значения для 000001:
+```csv
+payment_id;amount;currency;created_at;paid_at;status;comment
+000001;125.50;EUR;2026-09-01 08:00:00+00:00;2026-09-01 08:11:00+00:00;paid;"Заказ O'Reilly; доставка ""до двери"""
+```
+
+Число физических строк CSV не равно числу записей так как для некоторых заказов может быть указан многострочный комментарий, к примеру как для payment_id = '000007'<br />
+
+## Задание 2
+### Загрузка из payments_day1.csv
+#### Файл с принятыми к загрузке записями:
+```
+week_04/data/processed/LOAD_ID/payments.csv
+```
+#### Файл с отклоненными записями:
+```
+week_04/data/rejected/LOAD_ID/payments.jsonl
+```
+#### Статистика запуска:
+```
+week_04/data/processed/LOAD_ID/summary_payments.jsonl
+```
+```json
+{
+  "run_id": "60befda91e014bfe8f2e191328b57533", 
+  "source_file": "data\\raw\\payments_day1.csv", 
+  "status": "SUCCESS_WITH_REJECTS", 
+  "source_read_complete": true, 
+  "read": 100, 
+  "accepted": 98, 
+  "rejected": 2, 
+  "rejection_rate": "0.02", 
+  "load_allowed": true, 
+  "accepted_amount": "5077.50", 
+  "inserted": 98
+}
+```
+
+```sql
+select count(*) from de4_hw.payment_events
+```
+|count|
+|-----|
+|98|
+
+### Загрузка из payments_quality.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_quality.csv
+```
+#### Статистика запуска:
+```json
+{
+  "run_id": "0474024820044789b58cd3a2739ff60a", 
+  "source_file": "data\\raw\\payments_quality.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 20, 
+  "accepted": 4, 
+  "rejected": 16, 
+  "rejection_rate": "0.8", 
+  "load_allowed": false, 
+  "accepted_amount": "10000000135.50", 
+  "inserted": 0, 
+  "error": "Загрузка запрещена: превышена допустимая доля отклонений"
+}
+```
+
+Две записи с ключом 900019 отклонены - несмотря на ошибку в поле amount, по договору с источником все записи с повторяющимся в рамках файла payment_id должны быть исключены из загрузки, даже если другие поля ошибочны.
+```json
+{"run_id": "0474024820044789b58cd3a2739ff60a", "source_file": "data\\raw\\payments_quality.csv", "record_number": 19, "raw": {"Payment ID": "900019", "Amount": "9", "Currency": "EUR", "Created At": "2026-09-01T10:00:00+02:00", "Paid At": "2026-09-01T10:10:00+02:00", "Status": "paid", "Comment": "Обычная оплата"}, "errors": [{"field": "Payment ID", "code": "DUPLICATE_KEY", "message": "Ключ повторяется внутри загрузки"}]}
+{"run_id": "0474024820044789b58cd3a2739ff60a", "source_file": "data\\raw\\payments_quality.csv", "record_number": 20, "raw": {"Payment ID": " 900019 ", "Amount": "oops", "Currency": "EUR", "Created At": "2026-09-01T10:00:00+02:00", "Paid At": "2026-09-01T10:10:00+02:00", "Status": "paid", "Comment": "Обычная оплата"}, "errors": [{"field": "Payment ID", "code": "DUPLICATE_KEY", "message": "Ключ повторяется внутри загрузки"}]}
+```
+
+## Задание 3
+### orders.json
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/orders.json
+```
+#### Файл с принятыми к загрузке записями:
+```
+week_04/data/processed/LOAD_ID/orders.csv
+```
+
+#### Проверка на fixtures/orders_invalid_structure.json
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/fixtures/orders_invalid_structure.json
+```
+```json
+{
+  "run_id": "cc859613cd9d4f45afea43d53acac667",
+  "source_file": "data\\raw\\fixtures\\orders_invalid_structure.json",
+  "status": "FAILED",
+  "error": "Поле не может быть NULL: items"
+}
+```
+
+### orders_stream.jsonl
+```
+python week_04/src/prepare_orders.py --input week_04/data/raw/orders_stream.jsonl
+```
+
+#### Значение items - Ключ отсутствует
+```json
+{"run_id": "8329aef949424aec941c1b558c780474", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 6, "raw_text": "{\"order_id\": \"O_BAD_MISSING\", \"customer\": {\"customer_id\": \"000050\"}}", "reason": "Отсутствует поле: items"}
+```
+
+#### Значение items - null
+```json
+{"run_id": "8329aef949424aec941c1b558c780474", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 7, "raw_text": "{\"order_id\": \"O_BAD_NULL\", \"customer\": {\"customer_id\": \"000051\"}, \"items\": null}", "reason": "Поле не может быть NULL: items"}
+```
+
+#### Значение items - ""
+```json
+{"run_id": "8329aef949424aec941c1b558c780474", "source_file": "data\\raw\\orders_stream.jsonl", "line_number": 8, "raw_text": "{\"order_id\": \"O_BAD_STRING\", \"customer\": {\"customer_id\": \"000052\"}, \"items\": \"\"}", "reason": "items: ожидался тип list"}
+```
+
+#### Значение items - []
+Заказ отсутствует в rejected, записано 0 записей
+
+#### Статистика запуска:
+```json
+{
+  "run_id": "8329aef949424aec941c1b558c780474",
+  "source_file": "data\\raw\\orders_stream.jsonl",
+  "status": "SUCCESS_WITH_REJECTS",
+  "orders_read": 9,
+  "orders_accepted": 5,
+  "orders_rejected": 4,
+  "blank_lines": 1,
+  "items_written": 6,
+  "units": 13,
+  "total_amount": "140.10"
+}
+```
+
+## Задание 4 (продолжение заданий 1-2)
+### Сравнение загрузки через copy и batch
+Отключена загрузка в итоговую таблицу, проводится только заполнение буфера двумя способами и его проверка:
+```
+python week_04/src/load_payments_buffer_test.py --input week_04/data/raw/payments_day1.csv
+```
+
+Результат:
+```bash
+(.venv) PS ...\de_project> python week_04/src/load_payments_buffer_test.py --input week_04/data/raw/payments_day1.csv
+Пароль PostgreSQL: 
+COPY: записей = 98, сумма = 5077.50 EUR
+BATCH: записей = 98, сумма = 5077.50 EUR
+```
+
+Сохранность комментария с апострофом и многострочного комментария:
+```sql
+select payment_id, comment from de4_hw.payment_events where payment_id in ('000001', '000007')
+```
+|payment_id|comment|
+|----------|-------|
+|000001|Заказ O'Reilly; доставка "до двери"|
+|000007|Первая часть комментария<br>Вторая часть комментария|
+
+
+## Задание 5
+### Повторный запуск payments_day1.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_day1.csv
+```
+Допущено 98 записей, загружено в базу 0:
+```json
+{
+  "run_id": "c42bbb503f9943509b9e1b3746106aa1", 
+  "source_file": "data\\raw\\payments_day1.csv", 
+  "status": "SUCCESS_WITH_REJECTS", 
+  "source_read_complete": true, 
+  "read": 100, 
+  "accepted": 98, 
+  "rejected": 2, 
+  "rejection_rate": "0.02", 
+  "load_allowed": true, 
+  "accepted_amount": "5077.50", 
+  "inserted": 0
+}
+```
+
+### payments_delta.csv
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_delta.csv
+```
+Статистика расчета
+```json
+{
+  "run_id": "2839b8e490d442fb89a554eb961dc2b3", 
+  "source_file": "data\\raw\\payments_delta.csv", 
+  "status": "SUCCESS", 
+  "source_read_complete": true, 
+  "read": 5, 
+  "accepted": 5, 
+  "rejected": 0, 
+  "rejection_rate": "0", 
+  "load_allowed": true, 
+  "accepted_amount": "388.26", 
+  "inserted": 3
+}
+```
+```sql
+select count(*) as rows_cnt, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|sum_amount|
+|--------|----------|
+|101|5333.01|
+
+### payments_conflict.csv
+Состояние до попытки загрузки для платежей '000002', '000901'
+```sql
+select payment_id, paid_at, amount from de4_hw.payment_events where payment_id in ('000002', '000901')
+```
+|payment_id|paid_at|amount|
+|----------|-------|------|
+|000002|2026-09-01 10:12:00.000 +0200|80.00|
+
+Запуск конфликтного файла - откат транзакции
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_conflict.csv
+```
+```json
+{
+  "run_id": "c8710997c6ab4b67bb3202ebd39cce41", 
+  "source_file": "data\\raw\\payments_conflict.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 2, 
+  "accepted": 2, 
+  "rejected": 0, 
+  "rejection_rate": "0", 
+  "load_allowed": true, 
+  "accepted_amount": "113.33", 
+  "inserted": 0, 
+  "error": "Несовпадение платежа: 000002"
+}
+```
+
+Состояние после попытки загрузки для платежей '000002', '000901'
+```sql
+select payment_id, paid_at, amount from de4_hw.payment_events where payment_id in ('000002', '000901')
+```
+|payment_id|paid_at|amount|
+|----------|-------|------|
+|000002|2026-09-01 10:12:00.000 +0200|80.00|
+
+>Почему ON CONFLICT DO NOTHING само по себе недостаточно? <br />
+
+В загрузчике конфликт определяется по payment_id - предотвращается вставка еще одной строки с существующим ключом, но не проверяется равенство остальных полей события. Сравнение полей нужно для того, чтобы подтвердить, что повторный ключ обозначает то же неизмененное событие. Если хотя бы одно подготовленное значение отличается, то это конфликт, который должен остановить загрузку.
+
+>Почему проверка только количества и суммы пропустила бы изменение времени в конфликтном файле? <br />
+
+Количества строк и сумма amount не зависит от значений времени, тогда как время created_at и paid_at также являются описательными атрибутами в строке и требуют проверки
+
+>Чем повтор ключа внутри одного источника отличается от повторной доставки уже загруженного события?<br />
+
+Повтор ключа внутри одного источника - нарушение правила уникальности источника, по требованиям отклоняются все записи с повторяющимся ключом. <br />
+Повторная доставка уже загруженного события - ситуация между разными запусками, в новом файле приходит строка, которая уже есть в базе, повторная вставка не производится.
+
+## Задание 6
+### Ошибки входного файла
+Состояние базы до попыток вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+
+#### Нет заголовка, обработка не начинается
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/empty.csv
+```
+```json
+{
+  "run_id": "aac28636e31b4e51b0064b9cabeb4af3", 
+  "source_file": "data\\raw\\fixtures\\empty.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "Файл пуст: заголовок отсутствует"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+
+
+#### Заголовок верен, но записей нет; пустая загрузка запрещена
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/header_only.csv
+```
+```json
+{
+  "run_id": "29c0cb79f5654c09974f9999ca90d066", 
+  "source_file": "data\\raw\\fixtures\\header_only.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 0, 
+  "accepted": 0, 
+  "rejected": 0, 
+  "rejection_rate": null, 
+  "load_allowed": false, 
+  "accepted_amount": "0.00", 
+  "inserted": 0, 
+  "error": "Загрузка запрещена: в CSV нет данных"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Не хватает обязательной колонки
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/missing_column.csv
+```
+```json
+{
+  "run_id": "191a7d0a147b4a7babb76cc7138f02b0", 
+  "source_file": "data\\raw\\fixtures\\missing_column.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "Неверный заголовок: ['Payment ID', 'Amount', 'Created At', 'Paid At', 'Status', 'Comment']"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+
+#### Повторяющееся имя колонки
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/duplicate_column.csv
+```
+```json
+{
+  "run_id": "67e76dbb4dbc470fb606b1e097388b3d", 
+  "source_file": "data\\raw\\fixtures\\duplicate_column.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "Неверный заголовок: ['Payment ID', 'Amount', 'Currency', 'Created At', 'Paid At', 'Status', 'Comment', 'Amount']"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+
+#### Число полей записи не соответствует заголовку - меньше полей
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/short_row.csv
+```
+```json
+{
+  "run_id": "4959b9c4ac6541b0bba7b8d505f838b6", 
+  "source_file": "data\\raw\\fixtures\\short_row.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "В записи отсутствует поле: Comment"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Число полей записи не соответствует заголовку - больше полей
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/extra_field.csv
+```
+```json
+{
+  "run_id": "66f259a1edd3489c814f0e8f6bf9a836", 
+  "source_file": "data\\raw\\fixtures\\extra_field.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "Лишние поля: ['лишнее поле']"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Повреждены кавычки; нельзя надёжно продолжить CSV
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/broken_quotes.csv
+```
+```json
+{
+  "run_id": "6227350f9a094baeb48a7360adee1db3", 
+  "source_file": "data\\raw\\fixtures\\broken_quotes.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "unexpected end of data"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Ошибка декодирования файла
+```
+python week_04/src/load_payments.py --input week_04/data/raw/fixtures/invalid_utf8.csv
+```
+```json
+{
+  "run_id": "93d4135dbb8348798a9f0ac294c07669", 
+  "source_file": "data\\raw\\fixtures\\invalid_utf8.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "'utf-8' codec can't decode byte 0xff in position 61: invalid start byte"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Несуществующий путь - Ошибка открытия входного файла
+```
+python week_04/src/load_payments.py --input week_04/data/raw/invalid_path.csv
+```
+```json
+{
+  "run_id": "90e5a41e28724a56be3f4427ae108d2e", 
+  "source_file": "data\\raw\\invalid_path.csv", 
+  "status": "FAILED", 
+  "source_read_complete": false, 
+  "read": null, 
+  "accepted": null, 
+  "rejected": null, 
+  "rejection_rate": null, 
+  "load_allowed": null, 
+  "accepted_amount": null, 
+  "inserted": 0, 
+  "error": "Исходный CSV-файл не найден: C:\\Users\\elo01\\git\\de_project\\week_04\\data\\raw\\invalid_path.csv"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+#### Превышение порога отклонений после сохранения причин
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_quality.csv
+```
+```json
+{
+  "run_id": "6f2b40691ed44cd782b53bbc90510dbd", 
+  "source_file": "data\\raw\\payments_quality.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 20, 
+  "accepted": 4, 
+  "rejected": 16, 
+  "rejection_rate": "0.8", 
+  "load_allowed": false, 
+  "accepted_amount": "10000000135.50", 
+  "inserted": 0, 
+  "error": "Загрузка запрещена: превышена допустимая доля отклонений"
+}
+```
+Состояние базы после попытки вставки записей:
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|101|101|5333.01|
+
+### Контрольный сбой внутри транзакции
+```
+python week_04/src/load_payments_rollback.py --input week_04/data/raw/payments_rollback.csv
+```
+```json
+{
+  "run_id": "3aa4bda6244b4f0aa951eada8f001908", 
+  "source_file": "data\\raw\\payments_rollback.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 3, 
+  "accepted": 3, 
+  "rejected": 0, 
+  "rejection_rate": "0", 
+  "load_allowed": true, 
+  "accepted_amount": "60.00", 
+  "inserted": 0, 
+  "error": "Контрольный сбой после INSERT, до COMMIT"
+}
+```
+```sql
+select payment_id from de4_hw.payment_events where payment_id like '0003%' 
+--0 записей
+```
+
+#### Повторный прогон без сбоя
+```
+python week_04/src/load_payments.py --input week_04/data/raw/payments_rollback.csv
+```
+```json
+{
+  "run_id": "fe6e2455f8134229a7c0bd45947e8341", 
+  "source_file": "data\\raw\\payments_rollback.csv", 
+  "status": "SUCCESS", 
+  "source_read_complete": true, 
+  "read": 3, 
+  "accepted": 3, 
+  "rejected": 0, 
+  "rejection_rate": "0", 
+  "load_allowed": true, 
+  "accepted_amount": "60.00", 
+  "inserted": 3
+}
+```
+
+```sql
+select payment_id from de4_hw.payment_events where payment_id like '0003%' 
+--3 новых записи
+```
+|payment_id|
+|----------|
+|000301|
+|000302|
+|000303|
+
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|104|104|5393.01|
+
+
+### Ошибка подключения
+```
+$env:PGDATABASE = "wrong_dbname"
+python week_04/src/load_payments.py --input week_04/data/raw/payments_rollback.csv
+```
+```json
+{
+  "run_id": "5e79e9d383fc40a395d17efa277f3f83", 
+  "source_file": "data\\raw\\payments_rollback.csv", 
+  "status": "FAILED", 
+  "source_read_complete": true, 
+  "read": 3, 
+  "accepted": 3, 
+  "rejected": 0, 
+  "rejection_rate": "0", 
+  "load_allowed": true, 
+  "accepted_amount": "60.00", 
+  "inserted": 0, 
+  "error": "connection failed: connection to server at \"127.0.0.1\", port 5432 failed: �����:  ���� ������ \"wrong_dbname\" �� ����������"
+}
+```
+```sql
+select count(*) as rows_cnt, count(distinct payment_id) as count_payment_id, sum(amount) as sum_amount 
+from de4_hw.payment_events
+```
+|rows_cnt|count_payment_id|sum_amount|
+|--------|----------------|----------|
+|104|104|5393.01|

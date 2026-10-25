@@ -1,0 +1,1 @@
+{"run_id": "4959b9c4ac6541b0bba7b8d505f838b6", "source_file": "data\\raw\\fixtures\\short_row.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "В записи отсутствует поле: Comment"}

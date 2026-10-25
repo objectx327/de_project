@@ -1,0 +1,2 @@
+Payment ID;Amount;Currency;Created At;Paid At;Status;Comment
+000001;125,5;EUR;2026-09-01T10:00:00+02:00;2026-09-01T10:11:00+02:00;оплачен;"Заказ O'Reilly; доставка ""до двери""";лишнее поле

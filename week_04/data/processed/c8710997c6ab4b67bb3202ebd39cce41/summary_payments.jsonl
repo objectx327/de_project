@@ -1,0 +1,1 @@
+{"run_id": "c8710997c6ab4b67bb3202ebd39cce41", "source_file": "data\\raw\\payments_conflict.csv", "status": "FAILED", "source_read_complete": true, "read": 2, "accepted": 2, "rejected": 0, "rejection_rate": "0", "load_allowed": true, "accepted_amount": "113.33", "inserted": 0, "error": "Несовпадение платежа: 000002"}

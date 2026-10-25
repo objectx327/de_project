@@ -1,0 +1,1 @@
+{"run_id": "66f259a1edd3489c814f0e8f6bf9a836", "source_file": "data\\raw\\fixtures\\extra_field.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "Лишние поля: ['лишнее поле']"}

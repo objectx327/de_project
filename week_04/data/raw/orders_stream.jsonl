@@ -1,0 +1,10 @@
+{"order_id": "O0001", "customer": {"customer_id": "000041"}, "items": [{"line_no": 1, "sku": "A-01", "quantity": 2, "unit_price": "12.50"}, {"line_no": 2, "sku": "B-02", "quantity": 1, "unit_price": "40.00"}]}
+
+{"order_id": "O0002", "customer": {"customer_id": "000042"}, "items": [{"line_no": 1, "sku": "C-03", "quantity": 3, "unit_price": "7.20"}]}
+{"order_id":"O_BAD_JSON",
+{"order_id": "O0003", "customer": {"customer_id": "000043"}, "items": []}
+{"order_id": "O_BAD_MISSING", "customer": {"customer_id": "000050"}}
+{"order_id": "O_BAD_NULL", "customer": {"customer_id": "000051"}, "items": null}
+{"order_id": "O_BAD_STRING", "customer": {"customer_id": "000052"}, "items": ""}
+{"order_id": "O0004", "customer": {"customer_id": "000044"}, "items": [{"line_no": 1, "sku": "A-01", "quantity": 1, "unit_price": "12.50"}, {"line_no": 2, "sku": "D-04", "quantity": 2, "unit_price": "15.00"}]}
+{"order_id": "O0005", "customer": {"customer_id": "000045"}, "items": [{"line_no": 1, "sku": "E-05", "quantity": 4, "unit_price": "2.75"}]}

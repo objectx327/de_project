@@ -1,0 +1,1 @@
+{"run_id": "93d4135dbb8348798a9f0ac294c07669", "source_file": "data\\raw\\fixtures\\invalid_utf8.csv", "status": "FAILED", "source_read_complete": false, "read": null, "accepted": null, "rejected": null, "rejection_rate": null, "load_allowed": null, "accepted_amount": null, "inserted": 0, "error": "'utf-8' codec can't decode byte 0xff in position 61: invalid start byte"}
