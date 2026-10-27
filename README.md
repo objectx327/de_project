@@ -1861,3 +1861,1459 @@ from de4_hw.payment_events
 |rows_cnt|count_payment_id|sum_amount|
 |--------|----------------|----------|
 |104|104|5393.01|
+
+
+# Неделя 5
+### NorthCart: контракт учебного API
+```
+week_05/DE_Week5_Practice/API.md
+```
+### Подготовка БД
+```
+week_05/DE_Week5_Practice/00_setup.sql
+```
+
+### Названия переменных окружения
+```
+$env:PGHOST = "***"
+$env:PGPORT = "***"
+$env:PGDATABASE = "***"
+$env:PGUSER = "***"
+$env:PGPASSWORD = "***"
+$env:PGUSER = "***"
+$env:DE5_API_TOKEN='***'          
+```
+
+## Задание 1
+```py
+#сколько записей пришло в первом ответе
+orders_count = len(orders["data"])
+#сколько заявлено во всём наборе.
+total_count = orders["meta"]["total_count"]
+#курсор
+next_cursor = orders["next_cursor"]
+
+print("Статус:", response.status_code)
+print("Количество заказов в выборке:", orders_count)
+print("Сколько заявлено во всем наборе:", total_count)
+print("Следующий курсор:", next_cursor)
+```
+Вывод:
+```bash
+Статус: 200
+Количество заказов в выборке: 4
+Сколько заявлено во всем наборе: 18
+Следующий курсор: c_60ec999e48ce_4
+```
+
+Для status = 'paid':
+```py
+params = { 
+    "account_id": "shop_de",
+    "updated_from": "2026-09-24T00:00:00Z",
+    "updated_to": "2026-09-27T00:00:00Z",
+    "limit": 4,
+    "snapshot": "initial",
+    "scenario": "normal",
+    "status": "paid",
+}
+```
+
+```
+Статус: 200
+Количество заказов в выборке: 4
+Сколько заявлено во всем наборе: 12
+Следующий курсор: c_73358c158ca0_4
+```
+
+## Задание 2
+```py
+records_list, stats = read_all_pages(url, headers, params)
+
+print("scenario=normal")
+print(stats)
+for record in records_list:
+    print(record["order_id"])
+
+params["scenario"] = "empty_then_data"
+records_list, stats = read_all_pages(url, headers, params)
+
+print("scenario=empty_then_data")
+print(stats)
+for record in records_list:
+    print(record["order_id"])
+```
+	
+Вывод:
+```bash
+scenario=normal
+{'pages': 5, 'http_attempts': 5, 'received': 18}
+000001
+000002
+000003
+000004
+000005
+000006
+000007
+000008
+000009
+000010
+000011
+000012
+000013
+000014
+000015
+000016
+000017
+000018
+scenario=empty_then_data
+{'pages': 6, 'http_attempts': 6, 'received': 18}
+000001
+000002
+000003
+000004
+000005
+000006
+000007
+000008
+000009
+000010
+000011
+000012
+000013
+000014
+000015
+000016
+000017
+000018
+```
+
+## Задание 3
+
+```py
+records_list, stats = read_all_pages(url, headers, params, run_id)
+
+order_rows = []
+item_rows = []
+
+accepted_orders = 0
+accepted_items = 0
+accepted_total_amount = 0
+rejected_orders = 0
+
+for record in records_list:
+    raw = record["raw"]
+    try:
+        order_row, items = order_process(raw)
+    except ValueError as error:
+        #сохранение отклоненых записей
+        rejected_row = {
+            "run_id": run_id,
+            "raw_response_id": record["raw_response_id"],
+            "page_number": record["page_number"],
+            "row_number": record["row_number"],
+            "reason": str(error),
+            "raw_order": raw,
+        }
+
+        target_rejected.parent.mkdir(parents=True, exist_ok=True)
+        with target_rejected.open("a", encoding="utf-8") as file:
+            file.write(
+                json.dumps(rejected_row, ensure_ascii=False) + "\n"
+            )
+        rejected_orders += 1
+    else:
+        order_rows.append(order_row)
+        item_rows.append(items)
+
+        accepted_orders += 1
+        accepted_items += len(items)
+        accepted_total_amount += order_row["total_amount"]
+
+if accepted_orders + rejected_orders != stats["received"]:
+    raise RuntimeError("Нарушен баланс записей")
+
+print(f"Получено из api: {stats["received"]}")
+print(f"Принято заказов: {accepted_orders}")
+print(f"Позиций у принятых заказов: {accepted_items}")
+print(f"Сумма принятых заказов: {accepted_total_amount}")
+print(f"Отклонено заказов: {rejected_orders}")
+```
+Вывод:
+
+```
+Получено из api: 18
+Принято заказов: 14
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75
+Отклонено заказов: 4
+```
+
+#### Причины отклонений:
+```json
+{"run_id": "29b0194e7ae140cf9fdcf6a55ebcef9f", "raw_response_id": "ef26da5971114074a089d200fa6757ff", "page_number": 4, "row_number": 3, "reason": "Поле не может быть NULL: items", "raw_order": {"order_id": "000015", "customer": {"id": "C-00015", "segment": "retail"}, "status": "paid", "currency": "EUR", "total_amount": "152.00", "created_at": "2026-09-20T08:00:00Z", "updated_at": "2026-09-26T10:00:00Z", "items": null}}
+{"run_id": "29b0194e7ae140cf9fdcf6a55ebcef9f", "raw_response_id": "ef26da5971114074a089d200fa6757ff", "page_number": 4, "row_number": 4, "reason": "Отсутствует поле: customer", "raw_order": {"order_id": "000016", "status": "paid", "currency": "EUR", "total_amount": "121.25", "created_at": "2026-09-20T08:00:00Z", "updated_at": "2026-09-26T11:00:00Z", "items": [{"line_id": "01", "sku": "SKU-016-1", "quantity": 1, "unit_price": "40.25"}, {"line_id": "02", "sku": "SKU-016-2", "quantity": 2, "unit_price": "40.50"}]}}
+{"run_id": "29b0194e7ae140cf9fdcf6a55ebcef9f", "raw_response_id": "c5e2a5e9c99943298135fa92c75630fd", "page_number": 5, "row_number": 1, "reason": "total_amount: неверный формат", "raw_order": {"order_id": "000017", "customer": {"id": "C-00017", "segment": "retail"}, "status": "paid", "currency": "EUR", "total_amount": "12,50", "created_at": "2026-09-20T08:00:00Z", "updated_at": "2026-09-26T12:00:00Z", "items": [{"line_id": "01", "sku": "SKU-017-1", "quantity": 1, "unit_price": "42.75"}]}}
+{"run_id": "29b0194e7ae140cf9fdcf6a55ebcef9f", "raw_response_id": "c5e2a5e9c99943298135fa92c75630fd", "page_number": 5, "row_number": 2, "reason": "quantity: сумма меньше либо равна нулю", "raw_order": {"order_id": "000018", "customer": {"id": "C-00018", "segment": "retail"}, "status": "pending", "currency": "EUR", "total_amount": "0.00", "created_at": "2026-09-20T08:00:00Z", "updated_at": "2026-09-26T13:00:00Z", "items": [{"line_id": "01", "sku": "SKU-018-1", "quantity": 0, "unit_price": "45.00"}]}}
+```
+
+## Задание 4
+```
+python week_05/src/api_orders.py
+``` 
+Результаты работы скрипта:
+```
+run_id: 2ac0dcf7-e73f-478a-bd85-fc2b9f850465
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 14
+Обновлено: 0
+Пропущено: 0
+Файл с причинами отклонений: data/rejected/2ac0dcf7-e73f-478a-bd85-fc2b9f850465/api_orders.jsonl
+```
+```sql
+select * from de5_hw.load_runs
+```
+|run_id|source_system|source_account_id|period_from|period_to|started_at|finished_at|status|received_count|accepted_count|rejected_count|inserted_count|updated_count|skipped_count|error_summary|
+|------|-------------|-----------------|-----------|---------|----------|-----------|------|--------------|--------------|--------------|--------------|-------------|-------------|-------------|
+|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:40:43.277 +0100|2026-10-27 19:40:43.338 +0100|succeeded|18|14|4|14|0|0||
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+
+```sql
+select * from de5_hw.load_state
+```
+|source_system|source_account_id|completed_to|run_id|
+|-------------|-----------------|------------|------|
+|northcart|shop_de|2026-09-27 02:00:00.000 +0200|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|
+
+## Задание 5
+### Повтор исходной загрузки
+```bash
+python week_05/src/api_orders.py
+```
+
+```
+run_id: d290be0e-7999-4b5e-85f6-d57975e82af4
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/d290be0e-7999-4b5e-85f6-d57975e82af4/api_orders.jsonl
+```
+
+
+### Контроль дельты
+```bash
+python week_05/src/api_orders.py --snapshot updated --updated-from 2026-09-26T00:00:00Z --updated-to 2026-09-28T00:00:00Z
+```
+```
+run_id: 91b3f47b-0b06-49f1-bd90-b29ef5e063e2
+Статус: succeeded
+Успешных страниц: 3
+HTTP-попыток: 3
+Получено из API: 10
+Принято заказов: 6
+Отклонено заказов: 4
+Позиций у принятых заказов: 12
+Сумма принятых заказов: 481.25 EUR
+Вставлено: 2
+Обновлено: 2
+Пропущено: 2
+Файл с причинами отклонений: data/rejected/91b3f47b-0b06-49f1-bd90-b29ef5e063e2/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+```sql
+select order_id, status, run_id from de5_hw.orders where order_id in ('000003', '000008','000019',' 000020', '000006') order by 1
+```
+|order_id|status|run_id|
+|--------|------|------|
+|000003|refunded|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+|000006|pending|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|
+|000008|paid|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+|000019|paid|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+
+```sql
+select order_id, line_id, sku from de5_hw.order_items where order_id in ('000008') order by 1
+```
+|order_id|line_id|sku|
+|--------|-------|---|
+|000008|01|SKU-008-1|
+|000008|02|SKU-008-2|
+|000008|03|SKU-008-3|
+
+### Cтарый снимок initial за исходный период
+```sql
+select source_system,  source_account_id, completed_to, run_id from de5_hw.load_state
+```
+|source_system|source_account_id|completed_to|run_id|
+|-------------|-----------------|------------|------|
+|northcart|shop_de|2026-09-28 02:00:00.000 +0200|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+
+```bash
+python week_05/src/api_orders.py
+```
+```
+run_id: e798b885-ea7d-43b3-966b-8397d17ec26f
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/e798b885-ea7d-43b3-966b-8397d17ec26f/api_orders.jsonl
+```
+```sql
+select order_id, status, run_id from de5_hw.orders where order_id in ('000003', '000008') order by 1
+```
+|order_id|status|run_id|
+|--------|------|------|
+|000003|refunded|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+|000008|paid|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+
+```sql
+select source_system,  source_account_id, completed_to, run_id from de5_hw.load_state
+```
+|source_system|source_account_id|completed_to|run_id|
+|-------------|-----------------|------------|------|
+|northcart|shop_de|2026-09-28 02:00:00.000 +0200|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|
+
+### Конфликтный сценарий
+
+```sql
+select order_id, total_amount, status, run_id from de5_hw.orders where order_id in ('000001') order by 1
+```
+|order_id|total_amount|status|run_id|
+|--------|------------|------|------|
+|000001|2.75|paid|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|
+
+```sql
+select * from de5_hw.order_items where order_id in ('000001') order by order_id
+```
+|source_system|source_account_id|order_id|line_id|sku|quantity|unit_price|
+|-------------|-----------------|--------|-------|---|--------|----------|
+|northcart|shop_de|000001|01|SKU-001-1|1|2.75|
+
+```bash
+python week_05/src/api_orders.py --scenario conflict_same_version    
+```
+```
+2026-10-27 19:45:50,605 INFO event=load_started stage=run run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40
+2026-10-27 19:45:50,605 INFO event=http_started stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=1 attempt=1 http_attempts=1
+2026-10-27 19:45:50,617 INFO event=http_response stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=1 attempt=1 http_status=200 duratin=0.010075199999846518 raw_response_is=bf45239d-c8ff-4352-bbfd-6f44db5e291f
+2026-10-27 19:45:50,617 INFO event=page_received stage=pagination run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=1 records=4 received=4 http_attempts=1 duration_s=0.012 end=False
+2026-10-27 19:45:50,617 INFO event=http_started stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=2 attempt=1 http_attempts=2
+2026-10-27 19:45:50,622 INFO event=http_response stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=2 attempt=1 http_status=200 duratin=0.003411600016988814 raw_response_is=47d4914e-021b-4ddc-b4f8-6162d7f89712
+2026-10-27 19:45:50,623 INFO event=page_received stage=pagination run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=2 records=4 received=8 http_attempts=2 duration_s=0.005 end=False
+2026-10-27 19:45:50,623 INFO event=http_started stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=3 attempt=1 http_attempts=3
+2026-10-27 19:45:50,628 INFO event=http_response stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=3 attempt=1 http_status=200 duratin=0.003363099996931851 raw_response_is=2219e064-1638-4ec3-ae5b-086aafe53f82
+2026-10-27 19:45:50,628 INFO event=page_received stage=pagination run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=3 records=4 received=12 http_attempts=3 duration_s=0.005 end=False
+2026-10-27 19:45:50,628 INFO event=http_started stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=4 attempt=1 http_attempts=4
+2026-10-27 19:45:50,633 INFO event=http_response stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=4 attempt=1 http_status=200 duratin=0.0033941000001505017 raw_response_is=1fb49b98-6569-4360-b838-1cc462d98348
+2026-10-27 19:45:50,633 INFO event=page_received stage=pagination run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=4 records=4 received=16 http_attempts=4 duration_s=0.005 end=False
+2026-10-27 19:45:50,633 INFO event=http_started stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=5 attempt=1 http_attempts=5
+2026-10-27 19:45:50,638 INFO event=http_response stage=http run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=5 attempt=1 http_status=200 duratin=0.0029925000271759927 raw_response_is=db385a12-ffd8-490f-a1ed-8c0cd175af11
+2026-10-27 19:45:50,638 INFO event=page_received stage=pagination run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=5 records=2 received=18 http_attempts=5 duration_s=0.005 end=True
+2026-10-27 19:45:50,642 ERROR event=version_conflict stage=write run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=1 record_no=1 raw_response_id=bf45239d-c8ff-4352-bbfd-6f44db5e291f
+2026-10-27 19:45:50,643 WARNING event=rollback stage=write_orders run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 attempted_insert=0 attempted_update=0
+2026-10-27 19:45:50,645 ERROR event=load_failed stage=write_orders run_id=e43ef6c9-eb98-4255-b42c-e58f7f71fb40 page=1 processed_pages=5 attempt=1 http_status=200 duration_s=0.110 pages=5 http_attempts=5 received=18 accepted=1 rejected=0 error_type=RuntimeError 
+2026-10-27 19:45:50,645 ERROR event=program_failed stage=exit error_type=RuntimeError
+```
+
+```sql
+select order_id, total_amount, status, run_id from de5_hw.orders where order_id in ('000001') order by 1
+```
+|order_id|total_amount|status|run_id|
+|--------|------------|------|------|
+|000001|2.75|paid|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|
+
+```sql
+select * from de5_hw.order_items where order_id in ('000001') order by order_id
+```
+|source_system|source_account_id|order_id|line_id|sku|quantity|unit_price|
+|-------------|-----------------|--------|-------|---|--------|----------|
+|northcart|shop_de|000001|01|SKU-001-1|1|2.75|
+
+
+### История запусков
+```sql
+select * from de5_hw.load_runs order by started_at
+```
+|run_id|source_system|source_account_id|period_from|period_to|started_at|finished_at|status|received_count|accepted_count|rejected_count|inserted_count|updated_count|skipped_count|error_summary|
+|------|-------------|-----------------|-----------|---------|----------|-----------|------|--------------|--------------|--------------|--------------|-------------|-------------|-------------|
+|2ac0dcf7-e73f-478a-bd85-fc2b9f850465|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:40:43.277 +0100|2026-10-27 19:40:43.338 +0100|succeeded|18|14|4|14|0|0||
+|d290be0e-7999-4b5e-85f6-d57975e82af4|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:42:21.121 +0100|2026-10-27 19:42:21.164 +0100|succeeded|18|14|4|0|0|14||
+|91b3f47b-0b06-49f1-bd90-b29ef5e063e2|northcart|shop_de|2026-09-26 02:00:00.000 +0200|2026-09-28 02:00:00.000 +0200|2026-10-27 19:42:58.838 +0100|2026-10-27 19:42:58.881 +0100|succeeded|10|6|4|2|2|2||
+|e798b885-ea7d-43b3-966b-8397d17ec26f|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:44:17.091 +0100|2026-10-27 19:44:17.135 +0100|succeeded|18|14|4|0|0|14||
+|e43ef6c9-eb98-4255-b42c-e58f7f71fb40|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:45:50.595 +0100|2026-10-27 19:45:50.644 +0100|failed|18|1|0|0|0|0|stage=write_orders error_type=RuntimeError|
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+## Задание 6
+Фиксируем состояние базы:
+```sql
+select * from de5_hw.load_runs order by started_at
+;
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|run_id|source_system|source_account_id|period_from|period_to|started_at|finished_at|status|received_count|accepted_count|rejected_count|inserted_count|updated_count|skipped_count|error_summary|
+|------|-------------|-----------------|-----------|---------|----------|-----------|------|--------------|--------------|--------------|--------------|-------------|-------------|-------------|
+|0434880a-6dd5-4ff2-920d-c44cf6dca107|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 00:12:17.338 +0100|2026-10-27 00:12:17.389 +0100|succeeded|18|14|4|14|0|0||
+|c2279095-89d7-451d-87ae-aef7a10bf047|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 00:48:56.972 +0100|2026-10-27 00:48:57.015 +0100|succeeded|18|14|4|0|0|14||
+|8d38f9c7-133d-40e7-880f-d5d8d43109bc|northcart|shop_de|2026-09-26 02:00:00.000 +0200|2026-09-28 02:00:00.000 +0200|2026-10-27 00:54:40.388 +0100|2026-10-27 00:54:40.427 +0100|succeeded|10|6|4|2|2|2||
+|e03ad700-5eba-4251-903b-31fb4adb0a32|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 01:12:24.051 +0100|2026-10-27 01:12:24.099 +0100|succeeded|18|14|4|0|0|14||
+|7661a621-69d3-44c0-b339-4823e51ffdb0|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 01:18:37.194 +0100|2026-10-27 01:18:37.237 +0100|failed|18|1|0|0|0|0|RuntimeError|
+
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### scenario transient_503
+```
+python week_05/src/api_orders.py --scenario transient_503
+```
+```
+2026-10-27 19:47:56,267 INFO event=load_started stage=run run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d
+2026-10-27 19:47:56,268 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=1 attempt=1 http_attempts=1
+2026-10-27 19:47:56,274 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=1 attempt=1 http_status=200 duratin=0.004172599990852177 raw_response_is=8bb25e5e-2df1-479a-b233-0084a1d829da
+2026-10-27 19:47:56,274 INFO event=page_received stage=pagination run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:47:56,274 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 attempt=1 http_attempts=2
+2026-10-27 19:47:56,278 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 attempt=1 http_status=503 duratin=0.0029155000229366124 raw_response_is=db4d6797-d568-4023-a376-0550a667fb95
+2026-10-27 19:47:56,278 WARNING event=http_retry stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 attempt=1 next_attempt=2 http_status=503 sleep_s=1
+2026-10-27 19:47:57,279 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 attempt=2 http_attempts=3
+2026-10-27 19:47:57,283 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 attempt=2 http_status=200 duratin=0.0031991000287234783 raw_response_is=ee13ed2d-971b-461d-b565-9ceec7e4cd8a
+2026-10-27 19:47:57,283 INFO event=page_received stage=pagination run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 records=4 received=8 http_attempts=3 duration_s=1.009 end=False
+2026-10-27 19:47:57,283 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=3 attempt=1 http_attempts=4
+2026-10-27 19:47:57,287 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=3 attempt=1 http_status=200 duratin=0.0027453999500721693 raw_response_is=7b6dc0d4-9a2b-437c-babd-e2651f98ceec
+2026-10-27 19:47:57,287 INFO event=page_received stage=pagination run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=3 records=4 received=12 http_attempts=4 duration_s=0.004 end=False
+2026-10-27 19:47:57,287 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 attempt=1 http_attempts=5
+2026-10-27 19:47:57,291 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 attempt=1 http_status=200 duratin=0.0024961999733932316 raw_response_is=aabefeee-7aba-4e72-8fb4-c70f22fb0f1c
+2026-10-27 19:47:57,291 INFO event=page_received stage=pagination run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 records=4 received=16 http_attempts=5 duration_s=0.004 end=False
+2026-10-27 19:47:57,291 INFO event=http_started stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 attempt=1 http_attempts=6
+2026-10-27 19:47:57,296 INFO event=http_response stage=http run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 attempt=1 http_status=200 duratin=0.002709300024434924 raw_response_is=1b22b5ee-d0d9-4e13-a977-9d41c8879991
+2026-10-27 19:47:57,296 INFO event=page_received stage=pagination run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 records=2 received=18 http_attempts=6 duration_s=0.005 end=True
+2026-10-27 19:47:57,302 INFO event=page_processed stage=write run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=1 duration_s=0.006 accepted_couont=4 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=4
+2026-10-27 19:47:57,304 INFO event=page_processed stage=write run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=2 duration_s=0.002 accepted_couont=8 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=8
+2026-10-27 19:47:57,306 INFO event=page_processed stage=write run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=3 duration_s=0.002 accepted_couont=12 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=12
+2026-10-27 19:47:57,308 INFO event=order_rejected stage=validation run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 record_no=3 raw_response_id=aabefeee-7aba-4e72-8fb4-c70f22fb0f1c error_type=ValueError rejected_count=1
+2026-10-27 19:47:57,309 INFO event=order_rejected stage=validation run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 record_no=4 raw_response_id=aabefeee-7aba-4e72-8fb4-c70f22fb0f1c error_type=ValueError rejected_count=2
+2026-10-27 19:47:57,309 INFO event=page_processed stage=write run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=4 duration_s=0.002 accepted_couont=14 rejected_count=2 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:47:57,309 INFO event=order_rejected stage=validation run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 record_no=1 raw_response_id=1b22b5ee-d0d9-4e13-a977-9d41c8879991 error_type=ValueError rejected_count=3
+2026-10-27 19:47:57,310 INFO event=order_rejected stage=validation run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 record_no=2 raw_response_id=1b22b5ee-d0d9-4e13-a977-9d41c8879991 error_type=ValueError rejected_count=4
+2026-10-27 19:47:57,310 INFO event=page_processed stage=write run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d page=5 duration_s=0.001 accepted_couont=14 rejected_count=4 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:47:57,311 INFO event=verification_passed stage=verify run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d duration_s=0.001 received_count=18 accepted_count=14 rejected_count=4
+2026-10-27 19:47:57,322 INFO event=load_succeeded stage=commited run_id=a27c28d4-bbce-416f-a1fc-a8793a2e672d status=succeeded duration_s=1.117  pages=5 http_attempts=6 received=18 accepted=14 rejected=4 amount=470.75 inserted=0 updadted=0 skipped=14 items=0 written_total_amount=0 
+
+
+run_id: a27c28d4-bbce-416f-a1fc-a8793a2e672d
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 6
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/a27c28d4-bbce-416f-a1fc-a8793a2e672d/api_orders.jsonl
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### scenario rate_limit_once
+```
+python week_05/src/api_orders.py --scenario rate_limit_once
+```
+```
+2026-10-27 19:49:44,852 INFO event=load_started stage=run run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef
+2026-10-27 19:49:44,853 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=1 attempt=1 http_attempts=1
+2026-10-27 19:49:44,859 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=1 attempt=1 http_status=200 duratin=0.0045665999641641974 raw_response_is=1402711a-14b3-4228-ac00-3c57ec4ca6f8
+2026-10-27 19:49:44,860 INFO event=page_received stage=pagination run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=1 records=4 received=4 http_attempts=1 duration_s=0.007 end=False
+2026-10-27 19:49:44,860 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 attempt=1 http_attempts=2
+2026-10-27 19:49:44,865 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 attempt=1 http_status=429 duratin=0.0038392000133171678 raw_response_is=871f19ba-282d-47df-b92c-1d28301caa7b
+2026-10-27 19:49:44,865 WARNING event=http_retry stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 attempt=1 next_attempt=2 http_status=429 sleep_s=1
+2026-10-27 19:49:45,866 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 attempt=2 http_attempts=3
+2026-10-27 19:49:45,871 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 attempt=2 http_status=200 duratin=0.0032482999959029257 raw_response_is=ea1f5a8f-36cd-44ff-a883-29a8df7125da
+2026-10-27 19:49:45,871 INFO event=page_received stage=pagination run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 records=4 received=8 http_attempts=3 duration_s=1.011 end=False
+2026-10-27 19:49:45,871 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=3 attempt=1 http_attempts=4
+2026-10-27 19:49:45,875 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=3 attempt=1 http_status=200 duratin=0.0025810999795794487 raw_response_is=007c7489-ac10-4a59-aaa1-670e387b665b
+2026-10-27 19:49:45,875 INFO event=page_received stage=pagination run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=3 records=4 received=12 http_attempts=4 duration_s=0.004 end=False
+2026-10-27 19:49:45,875 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 attempt=1 http_attempts=5
+2026-10-27 19:49:45,880 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 attempt=1 http_status=200 duratin=0.003163499990478158 raw_response_is=ecc1144b-b84a-41f6-bd65-cbd429b06b1b
+2026-10-27 19:49:45,880 INFO event=page_received stage=pagination run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 records=4 received=16 http_attempts=5 duration_s=0.005 end=False
+2026-10-27 19:49:45,880 INFO event=http_started stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 attempt=1 http_attempts=6
+2026-10-27 19:49:45,884 INFO event=http_response stage=http run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 attempt=1 http_status=200 duratin=0.002710999979171902 raw_response_is=439f0b6e-ed26-4c33-a3c8-cd6e61f8c42c
+2026-10-27 19:49:45,884 INFO event=page_received stage=pagination run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 records=2 received=18 http_attempts=6 duration_s=0.004 end=True
+2026-10-27 19:49:45,890 INFO event=page_processed stage=write run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=1 duration_s=0.006 accepted_couont=4 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=4
+2026-10-27 19:49:45,893 INFO event=page_processed stage=write run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=2 duration_s=0.002 accepted_couont=8 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=8
+2026-10-27 19:49:45,895 INFO event=page_processed stage=write run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=3 duration_s=0.002 accepted_couont=12 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=12
+2026-10-27 19:49:45,898 INFO event=order_rejected stage=validation run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 record_no=3 raw_response_id=ecc1144b-b84a-41f6-bd65-cbd429b06b1b error_type=ValueError rejected_count=1
+2026-10-27 19:49:45,899 INFO event=order_rejected stage=validation run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 record_no=4 raw_response_id=ecc1144b-b84a-41f6-bd65-cbd429b06b1b error_type=ValueError rejected_count=2
+2026-10-27 19:49:45,899 INFO event=page_processed stage=write run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=4 duration_s=0.003 accepted_couont=14 rejected_count=2 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:49:45,899 INFO event=order_rejected stage=validation run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 record_no=1 raw_response_id=439f0b6e-ed26-4c33-a3c8-cd6e61f8c42c error_type=ValueError rejected_count=3
+2026-10-27 19:49:45,900 INFO event=order_rejected stage=validation run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 record_no=2 raw_response_id=439f0b6e-ed26-4c33-a3c8-cd6e61f8c42c error_type=ValueError rejected_count=4
+2026-10-27 19:49:45,900 INFO event=page_processed stage=write run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef page=5 duration_s=0.001 accepted_couont=14 rejected_count=4 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:49:45,901 INFO event=verification_passed stage=verify run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef duration_s=0.001 received_count=18 accepted_count=14 rejected_count=4
+2026-10-27 19:49:45,912 INFO event=load_succeeded stage=commited run_id=e1068430-19e0-4241-80be-7f09ed0ae6ef status=succeeded duration_s=1.135  pages=5 http_attempts=6 received=18 accepted=14 rejected=4 amount=470.75 inserted=0 updadted=0 skipped=14 items=0 written_total_amount=0 
+
+
+run_id: e1068430-19e0-4241-80be-7f09ed0ae6ef
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 6
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/e1068430-19e0-4241-80be-7f09ed0ae6ef/api_orders.jsonl
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### scenario timeout_once --read-timeout 0.2
+```
+python week_05/src/api_orders.py --scenario timeout_once --read-timeout 0.2
+```
+```
+2026-10-27 19:50:26,563 INFO event=load_started stage=run run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6
+2026-10-27 19:50:26,563 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=1 attempt=1 http_attempts=1
+2026-10-27 19:50:26,569 INFO event=http_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=1 attempt=1 http_status=200 duratin=0.0042378000216558576 raw_response_is=3faa5f3b-bdaf-4fdc-8557-0c8719784154
+2026-10-27 19:50:26,569 INFO event=page_received stage=pagination run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:50:26,569 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 attempt=1 http_attempts=2
+2026-10-27 19:50:26,783 WARNING event=http_no_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 attempt=1 http_status=none duration_s=0.213 error_type=ReadTimeout
+2026-10-27 19:50:26,783 WARNING event=http_retry stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 attempt=1 next_attempt=2 http_status=None sleep_s=1
+2026-10-27 19:50:27,783 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 attempt=2 http_attempts=3
+2026-10-27 19:50:27,788 INFO event=http_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 attempt=2 http_status=200 duratin=0.0035744999768212438 raw_response_is=27044710-5840-40e5-868d-dfe7af0618ba
+2026-10-27 19:50:27,789 INFO event=page_received stage=pagination run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 records=4 received=8 http_attempts=3 duration_s=1.219 end=False
+2026-10-27 19:50:27,789 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=3 attempt=1 http_attempts=4
+2026-10-27 19:50:27,793 INFO event=http_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=3 attempt=1 http_status=200 duratin=0.0031790999928489327 raw_response_is=44315173-556e-4dd6-b21f-a7f14cf6e1b1
+2026-10-27 19:50:27,793 INFO event=page_received stage=pagination run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=3 records=4 received=12 http_attempts=4 duration_s=0.005 end=False
+2026-10-27 19:50:27,793 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 attempt=1 http_attempts=5
+2026-10-27 19:50:27,797 INFO event=http_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 attempt=1 http_status=200 duratin=0.0029029000434093177 raw_response_is=e6168103-a87e-415c-bcce-369618be371c
+2026-10-27 19:50:27,798 INFO event=page_received stage=pagination run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 records=4 received=16 http_attempts=5 duration_s=0.004 end=False
+2026-10-27 19:50:27,798 INFO event=http_started stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 attempt=1 http_attempts=6
+2026-10-27 19:50:27,802 INFO event=http_response stage=http run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 attempt=1 http_status=200 duratin=0.0024525000480934978 raw_response_is=34e7ae2b-f4eb-4873-a5e0-0c16a66b4a1e
+2026-10-27 19:50:27,802 INFO event=page_received stage=pagination run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 records=2 received=18 http_attempts=6 duration_s=0.005 end=True
+2026-10-27 19:50:27,808 INFO event=page_processed stage=write run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=1 duration_s=0.006 accepted_couont=4 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=4
+2026-10-27 19:50:27,811 INFO event=page_processed stage=write run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=2 duration_s=0.002 accepted_couont=8 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=8
+2026-10-27 19:50:27,813 INFO event=page_processed stage=write run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=3 duration_s=0.002 accepted_couont=12 rejected_count=0 pending_inserted=0 pending_updated=0 skipped_count=12
+2026-10-27 19:50:27,815 INFO event=order_rejected stage=validation run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 record_no=3 raw_response_id=e6168103-a87e-415c-bcce-369618be371c error_type=ValueError rejected_count=1
+2026-10-27 19:50:27,816 INFO event=order_rejected stage=validation run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 record_no=4 raw_response_id=e6168103-a87e-415c-bcce-369618be371c error_type=ValueError rejected_count=2
+2026-10-27 19:50:27,816 INFO event=page_processed stage=write run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=4 duration_s=0.003 accepted_couont=14 rejected_count=2 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:50:27,816 INFO event=order_rejected stage=validation run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 record_no=1 raw_response_id=34e7ae2b-f4eb-4873-a5e0-0c16a66b4a1e error_type=ValueError rejected_count=3
+2026-10-27 19:50:27,817 INFO event=order_rejected stage=validation run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 record_no=2 raw_response_id=34e7ae2b-f4eb-4873-a5e0-0c16a66b4a1e error_type=ValueError rejected_count=4
+2026-10-27 19:50:27,817 INFO event=page_processed stage=write run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 page=5 duration_s=0.001 accepted_couont=14 rejected_count=4 pending_inserted=0 pending_updated=0 skipped_count=14
+2026-10-27 19:50:27,818 INFO event=verification_passed stage=verify run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 duration_s=0.001 received_count=18 accepted_count=14 rejected_count=4
+2026-10-27 19:50:27,828 INFO event=load_succeeded stage=commited run_id=2f6d265d-0a10-405c-a19b-ffa88e8bc0a6 status=succeeded duration_s=1.326  pages=5 http_attempts=6 received=18 accepted=14 rejected=4 amount=470.75 inserted=0 updadted=0 skipped=14 items=0 written_total_amount=0 
+
+
+run_id: 2f6d265d-0a10-405c-a19b-ffa88e8bc0a6
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 6
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/2f6d265d-0a10-405c-a19b-ffa88e8bc0a6/api_orders.jsonl
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### scenario persistent_503
+```
+python week_05/src/api_orders.py --scenario persistent_503
+```
+```
+2026-10-27 19:55:01,843 INFO event=load_started stage=run run_id=a3c54ad4-df18-4c46-b74d-00380b30b860
+2026-10-27 19:55:01,844 INFO event=http_started stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=1 attempt=1 http_attempts=1
+2026-10-27 19:55:01,850 INFO event=http_response stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=1 attempt=1 http_status=200 duratin=0.004179200041107833 raw_response_is=23880a1e-dfbc-494c-8cc1-4736b18ea7b5
+2026-10-27 19:55:01,850 INFO event=page_received stage=pagination run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:55:01,850 INFO event=http_started stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=1 http_attempts=2
+2026-10-27 19:55:01,854 INFO event=http_response stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=1 http_status=503 duratin=0.002765699988231063 raw_response_is=467a520e-4d11-47cf-a8e5-7f3ece7e6c3a
+2026-10-27 19:55:01,854 WARNING event=http_retry stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=1 next_attempt=2 http_status=503 sleep_s=1
+2026-10-27 19:55:02,855 INFO event=http_started stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=2 http_attempts=3
+2026-10-27 19:55:02,859 INFO event=http_response stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=2 http_status=503 duratin=0.003106400021351874 raw_response_is=e4dd1678-523c-4c2a-8405-dec06335b4e7
+2026-10-27 19:55:02,859 WARNING event=http_retry stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=2 next_attempt=3 http_status=503 sleep_s=2
+2026-10-27 19:55:04,860 INFO event=http_started stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=3 http_attempts=4
+2026-10-27 19:55:04,864 INFO event=http_response stage=http run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 attempt=3 http_status=503 duratin=0.0030291000148281455 raw_response_is=72763f75-9638-4345-9c65-850731c4a663
+2026-10-27 19:55:04,865 WARNING event=rollback stage=http_status run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 attempted_insert=0 attempted_update=0
+2026-10-27 19:55:04,875 ERROR event=load_failed stage=http_status run_id=a3c54ad4-df18-4c46-b74d-00380b30b860 page=2 processed_pages=1 attempt=3 http_status=503 duration_s=3.100 pages=1 http_attempts=4 received=4 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:55:04,875 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### scenario invalid_json
+```
+python week_05/src/api_orders.py --scenario invalid_json
+```
+```
+2026-10-27 19:55:32,237 INFO event=load_started stage=run run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509
+2026-10-27 19:55:32,238 INFO event=http_started stage=http run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=1 attempt=1 http_attempts=1
+2026-10-27 19:55:32,243 INFO event=http_response stage=http run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=1 attempt=1 http_status=200 duratin=0.0038005999522283673 raw_response_is=45fe595a-3f00-4fb7-9195-2d2d01df77b1
+2026-10-27 19:55:32,243 INFO event=page_received stage=pagination run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:55:32,243 INFO event=http_started stage=http run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=2 attempt=1 http_attempts=2
+2026-10-27 19:55:32,247 INFO event=http_response stage=http run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=2 attempt=1 http_status=200 duratin=0.002681799989659339 raw_response_is=87a19918-8a31-4f85-ac31-9c98f8526d52
+2026-10-27 19:55:32,248 WARNING event=rollback stage=parse_json run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 attempted_insert=0 attempted_update=0
+2026-10-27 19:55:32,250 ERROR event=load_failed stage=parse_json run_id=a26ce51b-01ad-4d5b-a1b6-2a40377b9509 page=2 processed_pages=1 attempt=1 http_status=200 duration_s=0.075 pages=1 http_attempts=2 received=4 accepted=0 rejected=0 error_type=ValueError 
+2026-10-27 19:55:32,250 ERROR event=program_failed stage=exit error_type=ValueError
+
+```
+
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### scenario wrong_structure
+```
+python week_05/src/api_orders.py --scenario wrong_structure
+```
+```
+2026-10-27 19:55:52,943 INFO event=load_started stage=run run_id=a510f6c9-6e94-43a1-be40-3240781fcd03
+2026-10-27 19:55:52,943 INFO event=http_started stage=http run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=1 attempt=1 http_attempts=1
+2026-10-27 19:55:52,949 INFO event=http_response stage=http run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=1 attempt=1 http_status=200 duratin=0.003918899979908019 raw_response_is=c3ab1f1c-6a83-4f56-88c2-259e9d2081d0
+2026-10-27 19:55:52,950 INFO event=page_received stage=pagination run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:55:52,950 INFO event=http_started stage=http run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=2 attempt=1 http_attempts=2
+2026-10-27 19:55:52,954 INFO event=http_response stage=http run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=2 attempt=1 http_status=200 duratin=0.0029557999805547297 raw_response_is=eb51f070-4d6b-4e47-acce-3865c2da552f
+2026-10-27 19:55:52,954 WARNING event=rollback stage=validate_page run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 attempted_insert=0 attempted_update=0
+2026-10-27 19:55:52,956 ERROR event=load_failed stage=validate_page run_id=a510f6c9-6e94-43a1-be40-3240781fcd03 page=2 processed_pages=1 attempt=1 http_status=200 duration_s=0.075 pages=1 http_attempts=2 received=4 accepted=0 rejected=0 error_type=ValueError 
+2026-10-27 19:55:52,956 ERROR event=program_failed stage=exit error_type=ValueError
+
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### scenario missing_cursor
+```
+python week_05/src/api_orders.py --scenario missing_cursor
+```
+```
+2026-10-27 19:56:04,175 INFO event=load_started stage=run run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe
+2026-10-27 19:56:04,175 INFO event=http_started stage=http run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=1 attempt=1 http_attempts=1
+2026-10-27 19:56:04,181 INFO event=http_response stage=http run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=1 attempt=1 http_status=200 duratin=0.0037193999742157757 raw_response_is=3d433732-b884-4479-ad59-a559bbec9dc5
+2026-10-27 19:56:04,181 INFO event=page_received stage=pagination run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=1 records=4 received=4 http_attempts=1 duration_s=0.005 end=False
+2026-10-27 19:56:04,181 INFO event=http_started stage=http run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=2 attempt=1 http_attempts=2
+2026-10-27 19:56:04,184 INFO event=http_response stage=http run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=2 attempt=1 http_status=200 duratin=0.0025110000278800726 raw_response_is=2c325af9-9a7c-4ad6-be53-7bebb3acd782
+2026-10-27 19:56:04,185 WARNING event=rollback stage=validate_page run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe attempted_insert=0 attempted_update=0
+2026-10-27 19:56:04,186 ERROR event=load_failed stage=validate_page run_id=e17b01f2-9591-43c2-9c74-0dbf555dd6fe page=2 processed_pages=1 attempt=1 http_status=200 duration_s=0.076 pages=1 http_attempts=2 received=4 accepted=0 rejected=0 error_type=ValueError 
+2026-10-27 19:56:04,186 ERROR event=program_failed stage=exit error_type=ValueError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### scenario cursor_loop
+```
+python week_05/src/api_orders.py --scenario cursor_loop
+```
+```
+2026-10-27 19:56:16,239 INFO event=load_started stage=run run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160
+2026-10-27 19:56:16,239 INFO event=http_started stage=http run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=1 attempt=1 http_attempts=1
+2026-10-27 19:56:16,245 INFO event=http_response stage=http run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=1 attempt=1 http_status=200 duratin=0.004146200022660196 raw_response_is=4a6a9a1f-406e-47f0-acdd-4b4771cd59fd
+2026-10-27 19:56:16,245 INFO event=page_received stage=pagination run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=1 records=4 received=4 http_attempts=1 duration_s=0.006 end=False
+2026-10-27 19:56:16,245 INFO event=http_started stage=http run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=2 attempt=1 http_attempts=2
+2026-10-27 19:56:16,249 INFO event=http_response stage=http run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=2 attempt=1 http_status=200 duratin=0.0029233000241219997 raw_response_is=6cc0a71b-dd63-42c0-8b06-ab751f866193
+2026-10-27 19:56:16,249 WARNING event=rollback stage=pagination run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 attempted_insert=0 attempted_update=0
+2026-10-27 19:56:16,251 ERROR event=load_failed stage=pagination run_id=d29e022c-2d5d-4eaf-9792-4fb96e5ef160 page=2 processed_pages=1 attempt=1 http_status=200 duration_s=0.087 pages=1 http_attempts=2 received=4 accepted=0 rejected=0 error_type=RuntimeError 
+2026-10-27 19:56:16,251 ERROR event=program_failed stage=exit error_type=RuntimeError
+
+```
+
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### limit 6
+```
+python week_05/src/api_orders.py --limit 6
+```
+```
+2026-10-27 19:56:28,741 INFO event=load_started stage=run run_id=35bbbcef-3e39-460d-967d-defb18b7a5e4
+2026-10-27 19:56:28,741 INFO event=http_started stage=http run_id=35bbbcef-3e39-460d-967d-defb18b7a5e4 page=1 attempt=1 http_attempts=1
+2026-10-27 19:56:28,747 INFO event=http_response stage=http run_id=35bbbcef-3e39-460d-967d-defb18b7a5e4 page=1 attempt=1 http_status=400 duratin=0.0038451000000350177 raw_response_is=48b3670b-e1d1-45cf-bc74-7625520a29af
+2026-10-27 19:56:28,747 WARNING event=rollback stage=http_status run_id=35bbbcef-3e39-460d-967d-defb18b7a5e4 attempted_insert=0 attempted_update=0
+2026-10-27 19:56:28,749 ERROR event=load_failed stage=http_status run_id=35bbbcef-3e39-460d-967d-defb18b7a5e4 page=1 processed_pages=0 attempt=1 http_status=400 duration_s=0.074 pages=0 http_attempts=1 received=0 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:56:28,749 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### account-id another_shop
+```
+python week_05/src/api_orders.py --account-id another_shop
+```
+```
+2026-10-27 19:56:41,271 INFO event=load_started stage=run run_id=536f7568-136a-4bf2-bc11-17fce5f2c57f
+2026-10-27 19:56:41,271 INFO event=http_started stage=http run_id=536f7568-136a-4bf2-bc11-17fce5f2c57f page=1 attempt=1 http_attempts=1
+2026-10-27 19:56:41,276 INFO event=http_response stage=http run_id=536f7568-136a-4bf2-bc11-17fce5f2c57f page=1 attempt=1 http_status=403 duratin=0.0032665999606251717 raw_response_is=d3c26fef-5437-4c94-81f7-7dfba47c2942
+2026-10-27 19:56:41,276 WARNING event=rollback stage=http_status run_id=536f7568-136a-4bf2-bc11-17fce5f2c57f attempted_insert=0 attempted_update=0
+2026-10-27 19:56:41,278 ERROR event=load_failed stage=http_status run_id=536f7568-136a-4bf2-bc11-17fce5f2c57f page=1 processed_pages=0 attempt=1 http_status=403 duration_s=0.068 pages=0 http_attempts=1 received=0 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:56:41,278 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### invalid token
+```
+$oldToken = $env:DE5_API_TOKEN
+$env:DE5_API_TOKEN = "invalid-token"
+
+python week_05/src/api_orders.py
+
+$env:DE5_API_TOKEN = $oldToken
+```
+```
+2026-10-27 19:57:27,966 INFO event=load_started stage=run run_id=f64b149f-d909-4b91-8523-1c564755d3cb
+2026-10-27 19:57:27,967 INFO event=http_started stage=http run_id=f64b149f-d909-4b91-8523-1c564755d3cb page=1 attempt=1 http_attempts=1
+2026-10-27 19:57:27,972 INFO event=http_response stage=http run_id=f64b149f-d909-4b91-8523-1c564755d3cb page=1 attempt=1 http_status=401 duratin=0.003256700001657009 raw_response_is=5f35c5db-8f21-4603-a7ec-f4c976a69e32
+2026-10-27 19:57:27,972 WARNING event=rollback stage=http_status run_id=f64b149f-d909-4b91-8523-1c564755d3cb attempted_insert=0 attempted_update=0
+2026-10-27 19:57:27,974 ERROR event=load_failed stage=http_status run_id=f64b149f-d909-4b91-8523-1c564755d3cb page=1 processed_pages=0 attempt=1 http_status=401 duration_s=0.067 pages=0 http_attempts=1 received=0 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:57:27,974 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+### url unknown
+```
+python week_05/src/api_orders.py --url http://127.0.0.1:8765/v1/unknown
+```
+```
+2026-10-27 19:58:01,485 INFO event=load_started stage=run run_id=c22a4504-509a-4eb7-b97c-a7b4617133b7
+2026-10-27 19:58:01,485 INFO event=http_started stage=http run_id=c22a4504-509a-4eb7-b97c-a7b4617133b7 page=1 attempt=1 http_attempts=1
+2026-10-27 19:58:01,490 INFO event=http_response stage=http run_id=c22a4504-509a-4eb7-b97c-a7b4617133b7 page=1 attempt=1 http_status=404 duratin=0.0035806999658234417 raw_response_is=a83284c9-7180-47f5-a41f-f4ecc7936108
+2026-10-27 19:58:01,491 WARNING event=rollback stage=http_status run_id=c22a4504-509a-4eb7-b97c-a7b4617133b7 attempted_insert=0 attempted_update=0
+2026-10-27 19:58:01,493 ERROR event=load_failed stage=http_status run_id=c22a4504-509a-4eb7-b97c-a7b4617133b7 page=1 processed_pages=0 attempt=1 http_status=404 duration_s=0.070 pages=0 http_attempts=1 received=0 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:58:01,493 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+;
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### Журнал запусков
+
+|run_id|source_system|source_account_id|period_from|period_to|started_at|finished_at|status|received_count|accepted_count|rejected_count|inserted_count|updated_count|skipped_count|error_summary|
+|------|-------------|-----------------|-----------|---------|----------|-----------|------|--------------|--------------|--------------|--------------|-------------|-------------|-------------|
+|a27c28d4-bbce-416f-a1fc-a8793a2e672d|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:47:56.257 +0100|2026-10-27 19:47:57.312 +0100|succeeded|18|14|4|0|0|14||
+|e1068430-19e0-4241-80be-7f09ed0ae6ef|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:49:44.841 +0100|2026-10-27 19:49:45.902 +0100|succeeded|18|14|4|0|0|14||
+|2f6d265d-0a10-405c-a19b-ffa88e8bc0a6|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:50:26.553 +0100|2026-10-27 19:50:27.819 +0100|succeeded|18|14|4|0|0|14||
+|a3c54ad4-df18-4c46-b74d-00380b30b860|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:55:01.833 +0100|2026-10-27 19:55:04.866 +0100|failed|4|0|0|0|0|0|stage=http_status error_type=HTTPError|
+|a26ce51b-01ad-4d5b-a1b6-2a40377b9509|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:55:32.228 +0100|2026-10-27 19:55:32.249 +0100|failed|4|0|0|0|0|0|stage=parse_json error_type=ValueError|
+|a510f6c9-6e94-43a1-be40-3240781fcd03|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:55:52.933 +0100|2026-10-27 19:55:52.955 +0100|failed|4|0|0|0|0|0|stage=validate_page error_type=ValueError|
+|e17b01f2-9591-43c2-9c74-0dbf555dd6fe|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:56:04.164 +0100|2026-10-27 19:56:04.185 +0100|failed|4|0|0|0|0|0|stage=validate_page error_type=ValueError|
+|d29e022c-2d5d-4eaf-9792-4fb96e5ef160|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:56:16.228 +0100|2026-10-27 19:56:16.250 +0100|failed|4|0|0|0|0|0|stage=pagination error_type=RuntimeError|
+|35bbbcef-3e39-460d-967d-defb18b7a5e4|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:56:28.730 +0100|2026-10-27 19:56:28.748 +0100|failed|0|0|0|0|0|0|stage=http_status error_type=HTTPError|
+|536f7568-136a-4bf2-bc11-17fce5f2c57f|northcart|another_shop|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:56:41.261 +0100|2026-10-27 19:56:41.277 +0100|failed|0|0|0|0|0|0|stage=http_status error_type=HTTPError|
+|f64b149f-d909-4b91-8523-1c564755d3cb|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:57:27.957 +0100|2026-10-27 19:57:27.973 +0100|failed|0|0|0|0|0|0|stage=http_status error_type=HTTPError|
+|c22a4504-509a-4eb7-b97c-a7b4617133b7|northcart|shop_de|2026-09-24 02:00:00.000 +0200|2026-09-27 02:00:00.000 +0200|2026-10-27 19:58:01.474 +0100|2026-10-27 19:58:01.492 +0100|failed|0|0|0|0|0|0|stage=http_status error_type=HTTPError|
+
+
+
+## Задание 7
+Пересоздание схемы:
+```sql
+drop schema de5_hw cascade
+```
+```
+week_05/DE_Week5_Practice/00_setup.sql
+```
+
+### Проверка A. Сбой API при первой загрузке
+```bash
+python week_05/src/api_orders.py --scenario persistent_503
+```
+
+```
+2026-10-27 19:59:48,326 INFO event=load_started stage=run run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf
+2026-10-27 19:59:48,327 INFO event=http_started stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=1 attempt=1 http_attempts=1
+2026-10-27 19:59:48,351 INFO event=http_response stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=1 attempt=1 http_status=200 duratin=0.022128200042061508 raw_response_is=ad56e2f1-f6c4-4eb4-adca-9bedf02dd738
+2026-10-27 19:59:48,351 INFO event=page_received stage=pagination run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=1 records=4 received=4 http_attempts=1 duration_s=0.024 end=False
+2026-10-27 19:59:48,351 INFO event=http_started stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=1 http_attempts=2
+2026-10-27 19:59:48,355 INFO event=http_response stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=1 http_status=503 duratin=0.0025881000328809023 raw_response_is=7823e3ac-9233-4341-b601-93e960f6c7cc
+2026-10-27 19:59:48,355 WARNING event=http_retry stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=1 next_attempt=2 http_status=503 sleep_s=1
+2026-10-27 19:59:49,355 INFO event=http_started stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=2 http_attempts=3
+2026-10-27 19:59:49,359 INFO event=http_response stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=2 http_status=503 duratin=0.002983700018376112 raw_response_is=3a1c3b91-a721-46bf-a815-3bcb0fad0192
+2026-10-27 19:59:49,359 WARNING event=http_retry stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=2 next_attempt=3 http_status=503 sleep_s=2
+2026-10-27 19:59:51,359 INFO event=http_started stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=3 http_attempts=4
+2026-10-27 19:59:51,364 INFO event=http_response stage=http run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 attempt=3 http_status=503 duratin=0.003497099969536066 raw_response_is=f0e26210-9849-4638-b788-6938060b0efb
+2026-10-27 19:59:51,365 WARNING event=rollback stage=http_status run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf attempted_insert=0 attempted_update=0
+2026-10-27 19:59:51,375 ERROR event=load_failed stage=http_status run_id=86f58643-dbed-4e51-a895-2bf0a9ac8acf page=2 processed_pages=1 attempt=3 http_status=503 duration_s=3.109 pages=1 http_attempts=4 received=4 accepted=0 rejected=0 error_type=HTTPError 
+2026-10-27 19:59:51,375 ERROR event=program_failed stage=exit error_type=HTTPError
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|0||
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|0||
+
+Повторный запуск normal
+```bash
+python week_05/src/api_orders.py --scenario normal
+```
+
+```
+run_id: badb9f83-4c4a-4480-902e-a74b790e4fe4
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 14
+Обновлено: 0
+Пропущено: 0
+Файл с причинами отклонений: data/rejected/badb9f83-4c4a-4480-902e-a74b790e4fe4/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+
+### Проверка B. Сбой после записи данных
+```bash
+python week_05/src/api_orders.py --snapshot updated --updated-from 2026-09-26T00:00:00Z --updated-to 2026-09-28T00:00:00Z --fail-after-page 2
+```
+```
+2026-10-27 20:00:35,910 INFO event=load_started stage=run run_id=230fcee1-3d5f-42f1-91d2-3e3368022729
+2026-10-27 20:00:35,910 INFO event=http_started stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 attempt=1 http_attempts=1
+2026-10-27 20:00:35,915 INFO event=http_response stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 attempt=1 http_status=200 duratin=0.0037269999738782644 raw_response_is=3a8aa064-de2d-47c2-bce2-b4407577cebc
+2026-10-27 20:00:35,916 INFO event=page_received stage=pagination run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 records=4 received=4 http_attempts=1 duration_s=0.005 end=False
+2026-10-27 20:00:35,916 INFO event=http_started stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 attempt=1 http_attempts=2
+2026-10-27 20:00:35,919 INFO event=http_response stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 attempt=1 http_status=200 duratin=0.0024772000033408403 raw_response_is=e0c71104-8df5-4f32-a347-aaf48954cc74
+2026-10-27 20:00:35,919 INFO event=page_received stage=pagination run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 records=4 received=8 http_attempts=2 duration_s=0.004 end=False
+2026-10-27 20:00:35,920 INFO event=http_started stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=3 attempt=1 http_attempts=3
+2026-10-27 20:00:35,923 INFO event=http_response stage=http run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=3 attempt=1 http_status=200 duratin=0.0020686000352725387 raw_response_is=2f11fd9c-74dd-48a1-bcf4-4c6929175bbb
+2026-10-27 20:00:35,923 INFO event=page_received stage=pagination run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=3 records=2 received=10 http_attempts=3 duration_s=0.003 end=True
+2026-10-27 20:00:35,928 INFO event=order_rejected stage=validation run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 record_no=3 raw_response_id=3a8aa064-de2d-47c2-bce2-b4407577cebc error_type=ValueError rejected_count=1
+2026-10-27 20:00:35,928 INFO event=order_rejected stage=validation run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 record_no=4 raw_response_id=3a8aa064-de2d-47c2-bce2-b4407577cebc error_type=ValueError rejected_count=2
+2026-10-27 20:00:35,928 INFO event=page_processed stage=write run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=1 duration_s=0.006 accepted_couont=2 rejected_count=2 pending_inserted=0 pending_updated=0 skipped_count=2
+2026-10-27 20:00:35,929 INFO event=order_rejected stage=validation run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 record_no=1 raw_response_id=e0c71104-8df5-4f32-a347-aaf48954cc74 error_type=ValueError rejected_count=3
+2026-10-27 20:00:35,929 INFO event=order_rejected stage=validation run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 record_no=2 raw_response_id=e0c71104-8df5-4f32-a347-aaf48954cc74 error_type=ValueError rejected_count=4
+2026-10-27 20:00:35,934 INFO event=page_processed stage=write run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 duration_s=0.006 accepted_couont=4 rejected_count=4 pending_inserted=0 pending_updated=2 skipped_count=2
+2026-10-27 20:00:35,934 WARNING event=test_forced_failure stage=write run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2
+2026-10-27 20:00:35,934 WARNING event=rollback stage=test_failure run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 attempted_insert=0 attempted_update=2
+2026-10-27 20:00:35,935 ERROR event=load_failed stage=test_failure run_id=230fcee1-3d5f-42f1-91d2-3e3368022729 page=2 processed_pages=3 attempt=1 http_status=200 duration_s=0.089 pages=3 http_attempts=3 received=10 accepted=4 rejected=4 error_type=RuntimeError 
+2026-10-27 20:00:35,935 ERROR event=program_failed stage=exit error_type=RuntimeError
+
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+```bash
+python week_05/src/api_orders.py --snapshot updated --updated-from 2026-09-26T00:00:00Z --updated-to 2026-09-28T00:00:00Z 
+```
+```
+run_id: da1b274c-52cd-450f-b7f1-083edcedab29
+Статус: succeeded
+Успешных страниц: 3
+HTTP-попыток: 3
+Получено из API: 10
+Принято заказов: 6
+Отклонено заказов: 4
+Позиций у принятых заказов: 12
+Сумма принятых заказов: 481.25 EUR
+Вставлено: 2
+Обновлено: 2
+Пропущено: 2
+Файл с причинами отклонений: data/rejected/da1b274c-52cd-450f-b7f1-083edcedab29/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+### Проверка C. Данные без событий и расширение ответа
+Отдельный тест:
+```sql
+CREATE DATABASE de_course_test OWNER de_student;
+```
+```
+week_05/DE_Week5_Practice/00_setup.sql
+```
+```bash
+$env:PGDATABASE='de_course_test'  
+python week_05/src/api_orders.py --updated-from 2026-10-01T00:00:00Z --updated-to 2026-10-02T00:00:00Z
+```
+```
+run_id: 63671e32-79b4-4298-ad83-55553ff08e25
+Статус: succeeded
+Успешных страниц: 1
+HTTP-попыток: 1
+Получено из API: 0
+Принято заказов: 0
+Отклонено заказов: 0
+Позиций у принятых заказов: 0
+Сумма принятых заказов: 0 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 0
+Файл с причинами отклонений: None
+```
+
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|0||
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|0||
+
+Чтобы не смешивать результаты запусков:
+```sql
+DELETE FROM de5_hw.load_state;
+```
+```bash
+python week_05/src/api_orders.py --scenario normal
+```
+``` 
+run_id: a5267554-9f21-4ed8-a5dd-4f50bb26508a
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 14
+Обновлено: 0
+Пропущено: 0
+Файл с причинами отклонений: data/rejected/a5267554-9f21-4ed8-a5dd-4f50bb26508a/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+```bash
+python week_05/src/api_orders.py --scenario new_field
+```
+```
+run_id: 779e96ae-7d75-4334-9034-6afe3064f902
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/779e96ae-7d75-4334-9034-6afe3064f902/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+Пример нового поля в сохраненном архиве:
+
+```json
+{"data": [{"order_id": "000009", "customer": {"id": "C-00009", "segment": "retail"}, "status": "paid", "currency": "EUR", "total_amount": "22.75", "created_at": "2026-09-20T08:00:00Z", "updated_at": "2026-09-25T10:00:00Z", "items": [{"line_id": "01", ...}], "promotion_note": "Дополнительное поле источника"}, ...], "next_cursor": "c_f884a766340b_12", "meta": {"total_count": 18, "snapshot": "initial"}}
+```
+
+## Задание 8
+### Рабочие команды
+```
+python week_05/src/api_orders.py
+```
+
+| Аргумент | Значение по умолчанию / назначение |
+|---|---|
+| `--url` | `http://127.0.0.1:8765/v1/orders`;  без секретов и запросов в ссылке |
+| `--account-id` | `shop_de` |
+| `--updated-from` | `2026-09-24T00:00:00Z`, нижняя граница включительно |
+| `--updated-to` | `2026-09-27T00:00:00Z`, верхняя граница исключительно, больше нижней |
+| `--snapshot` | `initial`или `updated` |
+| `--scenario` | по умолчанию `normal` |
+| `--limit` | Целое от 1 до 5; по умолчанию 4, `6` разрешено передать серверу для отрицательного теста HTTP 400 |
+| `--status` | `pending`, `paid`, `cancelled` или `refunded`; без параметра все статусы |
+| `--connect-timeout` | `5.0`, HTTP-соединение, секунды |
+| `--read-timeout` | `30.0`, чтение API, секунды; `0.2` для `timeout_once` |
+| `--fail-after-page 2` | Тестовое исключение после SQL-обработки второй страницы, до COMMIT |
+
+### Зависимости
+```
+requests>=2.32,<3
+psycopg[binary]>=3.2,<4
+```
+### Переменные окружения
+```
+$env:PGHOST = "***"
+$env:PGPORT = "***"
+$env:PGDATABASE = "***"
+$env:PGUSER = "***"
+$env:PGPASSWORD = "***"
+$env:PGUSER = "***"
+$env:DE5_API_TOKEN='***'          
+```
+
+### Правила версий и обработки повторов
+* новый ключ: вставка;
+* более новое время: обновление заказа и замена его полного набора позиций в одной транзакции;
+* более старое время: пропуск;
+* одинаковое время и одинаковые подготовленные бизнес-поля и позиции: пропуск;
+* одинаковое время, но разные подготовленные бизнес-поля или позиции: конфликт, остановка запуска и откат его изменений.
+
+В практике максимум три попытки одного GET-запроса **включая первую**. Для временных сетевых ошибок, тайм-аутов и 500/502/503/504 паузы перед повторами 1 и 2 секунды. Для 429 пауза не меньше одновременно соответствующей базовой паузы и полученного `Retry-After`; учебный сервер возвращает целые секунды. Ошибки 400/401/403/404, неверный JSON и структура не повторяются автоматически.
+
+Используется одна транзакция данных на весь небольшой запуск. Запись `running` в `load_runs` создаётся и фиксируется до неё. Изменения заказов и позиций, отметка завершённого периода и успешный статус фиксируются вместе только после полного обхода и сверки. При ошибке транзакция данных откатывается; затем отдельной транзакцией обновляется исходная запись запуска до `failed`.
+
+Архив HTTP-ответов и файлы отклонений лежат вне этой транзакции и сохраняются для разбора. По ним нельзя считать данные загруженными. Весь период может быть успешно завершён с отклонёнными заказами, если каждая запись классифицирована и все отклонения сохранены: это явно принятое правило данного кейса.
+
+`load_state.completed_to` хранит верхнюю исключённую границу последнего успешно обработанного периода. Обновляется только вместе с успешными данными; не уменьшается при повторной загрузке старого периода. Если граница не изменилась, её прежний `run_id` тоже сохраняется. Загрузка с тестовым фильтром `status` не обновляет общий прогресс всех заказов.
+
+### Запуски
+Исходный 
+```
+python week_05/src/api_orders.py --scenario normal
+```
+```
+run_id: d8c079d5-65d4-4cae-84c5-00116984c1df
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 14
+Обновлено: 0
+Пропущено: 0
+Файл с причинами отклонений: data/rejected/d8c079d5-65d4-4cae-84c5-00116984c1df/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+
+Повтор исходного
+```
+python week_05/src/api_orders.py --scenario normal
+```
+```
+run_id: 18b9a7d7-0d4b-4660-8222-a2204a929f29
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/18b9a7d7-0d4b-4660-8222-a2204a929f29/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|14|470.75|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|19|470.75|
+
+Дельта после исходного
+```
+python week_05/src/api_orders.py --snapshot updated --updated-from 2026-09-26T00:00:00Z --updated-to 2026-09-28T00:00:00Z --scenario normal
+```
+```
+run_id: 3ea25ce9-29cf-40cc-9525-ab0288bcd93e
+Статус: succeeded
+Успешных страниц: 3
+HTTP-попыток: 3
+Получено из API: 10
+Принято заказов: 6
+Отклонено заказов: 4
+Позиций у принятых заказов: 12
+Сумма принятых заказов: 481.25 EUR
+Вставлено: 2
+Обновлено: 2
+Пропущено: 2
+Файл с причинами отклонений: data/rejected/3ea25ce9-29cf-40cc-9525-ab0288bcd93e/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+
+Старый снимок после дельты
+```
+python week_05/src/api_orders.py --snapshot initial --updated-from 2026-09-24T00:00:00Z --updated-to 2026-09-27T00:00:00Z --scenario normal
+```
+```
+run_id: b694864a-3540-456d-8297-49bad272e5df
+Статус: succeeded
+Успешных страниц: 5
+HTTP-попыток: 5
+Получено из API: 18
+Принято заказов: 14
+Отклонено заказов: 4
+Позиций у принятых заказов: 19
+Сумма принятых заказов: 470.75 EUR
+Вставлено: 0
+Обновлено: 0
+Пропущено: 14
+Файл с причинами отклонений: data/rejected/b694864a-3540-456d-8297-49bad272e5df/api_orders.jsonl
+```
+```sql
+select count(*) as rows_count, sum(total_amount) as total_amount from de5_hw.orders
+```
+|rows_count|total_amount|
+|----------|------------|
+|16|826.00|
+
+```sql
+select count(*) as rows_count, sum(quantity*unit_price) as total_amount from de5_hw.order_items
+```
+|rows_count|total_amount|
+|----------|------------|
+|25|826.00|
+
+#### Проверки данных (нет ошибок => 0 записей в результатах)
+```sql
+--уникальность ключей
+select source_system, source_account_id, order_id, count(*) 
+from de5_hw.orders
+group by source_system, source_account_id, order_id 
+having count(*) > 1
+;
+select source_system, source_account_id, order_id, line_id, count(*)
+from de5_hw.order_items
+group by source_system, source_account_id, order_id, line_id
+having count(*) > 1
+;
+-- отсутствие позиций без заказа
+select * from de5_hw.order_items
+where order_id not in (select order_id from de5_hw.orders)
+;
+-- совпадение суммы позиций с total_amount каждого заказа
+with oi as (
+	select order_id, sum(quantity*unit_price) as total_amount
+	from de5_hw.order_items
+	group by order_id
+)
+select o.order_id, o.total_amount , oi.order_id , oi.total_amount 
+from de5_hw.orders o
+join oi 
+	on o.order_id = oi.order_id
+where o.total_amount != oi.total_amount
+
+```
+```sql
+-- гостевой заказ с NULL customer_id и сохранение заказов без позиций
+select o.order_id, o.customer_id 
+from de5_hw.orders o
+left join (select distinct order_id from de5_hw.order_items) oi 
+	on o.order_id = oi.order_id 
+where customer_id is null
+	or oi.order_id is null
+```
+|order_id|customer_id|
+|--------|-----------|
+|000002|C-00002|
+|000004||
+|000006|C-00006|
+|000010|C-00010|
+|000014|C-00014|

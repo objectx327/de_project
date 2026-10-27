@@ -1,0 +1,20 @@
+{
+  "run_id": "a26ce51b-01ad-4d5b-a1b6-2a40377b9509",
+  "raw_response_id": "87a19918-8a31-4f85-ac31-9c98f8526d52",
+  "received_at": "2026-10-27T18:55:32.246585+00:00",
+  "endpoint": "http://127.0.0.1:8765/v1/orders",
+  "params": {
+    "account_id": "shop_de",
+    "updated_from": "2026-09-24T00:00:00Z",
+    "updated_to": "2026-09-27T00:00:00Z",
+    "limit": 4,
+    "snapshot": "initial",
+    "scenario": "invalid_json",
+    "cursor": "c_d5904d9056a1_4"
+  },
+  "page_number": 2,
+  "attempt": 1,
+  "http_status": 200,
+  "duration_s": 0.002682,
+  "body_path": "data/raw/api_responses/a26ce51b-01ad-4d5b-a1b6-2a40377b9509/87a19918-8a31-4f85-ac31-9c98f8526d52.bin"
+}
