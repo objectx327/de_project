@@ -1,5 +1,5 @@
 -- Подготовка БД
---week_05/DE_Week5_Practice/00_setup.sql
+--week_05/DE_Week5_Practice/setup.sql
 -- Run once in your existing learning database, using your SQL client.
 -- This script creates a separate schema and does not delete existing data.
 /*
@@ -87,12 +87,6 @@ select * from de5_hw.order_items where order_id in ('000001') order by order_id
 ;
 select * from de5_hw.load_runs order by started_at
 ;
-drop schema de5_hw cascade
-;
-create database de_course_test owner de_student
-;
-delete from de5_hw.load_state
-;
 --уникальность ключей
 select source_system, source_account_id, order_id, count(*) 
 from de5_hw.orders
@@ -105,20 +99,38 @@ group by source_system, source_account_id, order_id, line_id
 having count(*) > 1
 ;
 -- отсутствие позиций без заказа
-select * from de5_hw.order_items
-where order_id not in (select order_id from de5_hw.orders)
+SELECT i.*
+FROM de5_hw.order_items AS i
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM de5_hw.orders AS o
+    WHERE o.source_system = i.source_system
+      AND o.source_account_id = i.source_account_id
+      AND o.order_id = i.order_id
+)
 ;
 -- совпадение суммы позиций с total_amount каждого заказа
-with oi as (
-	select order_id, sum(quantity*unit_price) as total_amount
-	from de5_hw.order_items
-	group by order_id
-)
-select o.order_id, o.total_amount , oi.order_id , oi.total_amount 
-from de5_hw.orders o
-join oi 
-	on o.order_id = oi.order_id
-where o.total_amount != oi.total_amount
+SELECT
+    o.source_system,
+    o.source_account_id,
+    o.order_id,
+    o.total_amount,
+    COALESCE(
+        SUM(i.quantity * i.unit_price),
+        0
+    ) AS items_amount
+FROM de5_hw.orders AS o
+LEFT JOIN de5_hw.order_items AS i
+    ON i.source_system = o.source_system
+    AND i.source_account_id = o.source_account_id
+    AND i.order_id = o.order_id
+GROUP BY
+    o.source_system,
+    o.source_account_id,
+    o.order_id,
+    o.total_amount
+HAVING o.total_amount IS DISTINCT FROM
+    COALESCE(SUM(i.quantity * i.unit_price), 0)
 ;
 -- гостевой заказ с NULL customer_id и сохранение заказов без позиций
 select o.order_id, o.customer_id 

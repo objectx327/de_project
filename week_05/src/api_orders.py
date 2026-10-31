@@ -105,7 +105,7 @@ def archive_response(response, run_id, url, params, page_number, attempt, durati
 
 #проверка страницы
 #Проверить структуру ответа
-def validate_page(orders):
+def validate_page(orders, expected_snapshot):
     if not isinstance(orders, dict): 
         raise ValueError("Ожидался JSON-объект")
     
@@ -137,8 +137,8 @@ def validate_page(orders):
     if "snapshot" not in meta: 
         raise ValueError("В ответе отсутствует поле snapshot") 
     snapshot = meta["snapshot"]
-    if snapshot not in ("initial", "updated"): 
-        raise ValueError("Некорректный snapshot") 
+    if snapshot != expected_snapshot:
+        raise ValueError("Снимок ответа не совпадает с запрошенным") 
     return records, cursor, total_count
 
 #Чтение страницы
@@ -206,7 +206,7 @@ def fetch_page(url, headers, params, stats, run_id, read_timeout=30.0, connect_t
                         raise ValueError("Некорректный JSON") from error
                     stats["stage"] = "validate_page"
 
-                    records, cursor, total_count = validate_page(orders)
+                    records, cursor, total_count = validate_page(orders, params.get("snapshot", "initial"))
                     return records, cursor, total_count, raw_response_id, received_at
 
                 stats["stage"] = "http_status"
@@ -269,6 +269,8 @@ def read_all_pages(url, headers, base_params, run_id, stats, read_timeout=30.0, 
 
         if stats["pages"] == 0:
             stats["total_count"] = total_count
+        elif total_count != stats["total_count"]:
+            raise RuntimeError("Изменился total_count во время обхода страниц")
 
         page_number = stats["pages"] + 1
 
