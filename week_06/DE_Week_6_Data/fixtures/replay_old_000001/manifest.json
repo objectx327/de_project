@@ -1,0 +1,15 @@
+{
+  "dataset": "orders",
+  "batch_id": "replay_old_000001",
+  "mode": "replay",
+  "scope": [
+    "shop",
+    "pos"
+  ],
+  "complete": true,
+  "data_file": "orders.jsonl",
+  "record_count": 1,
+  "sha256": "b30acdd7b53aaf580c660c43cc276db668f7eaeb44ffd6174611c320278e1728",
+  "advances_watermark": false,
+  "note": "Искусственный повтор старого состояния, не новый интервал источника."
+}

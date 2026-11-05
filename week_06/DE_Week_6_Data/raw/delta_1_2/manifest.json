@@ -1,0 +1,16 @@
+{
+  "dataset": "orders",
+  "batch_id": "delta_1_2",
+  "mode": "delta",
+  "scope": [
+    "shop",
+    "pos"
+  ],
+  "complete": true,
+  "data_file": "orders.jsonl",
+  "record_count": 5,
+  "sha256": "a7da4e76768e80b4e3920a82f5460d1b21262186e55d285956b75fd15b30a256",
+  "lower_bound": "2026-09-29T09:00:00+00:00",
+  "upper_bound": "2026-09-29T10:00:00+00:00",
+  "as_of": "2026-09-29T10:00:00+00:00"
+}

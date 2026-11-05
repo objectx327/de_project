@@ -1,0 +1,17 @@
+{
+  "dataset": "orders",
+  "batch_id": "conflict_target_1015",
+  "mode": "delta",
+  "scope": [
+    "shop",
+    "pos"
+  ],
+  "complete": true,
+  "data_file": "orders.jsonl",
+  "record_count": 1,
+  "sha256": "2f79e40a6674c507f6e2f28934e794a0b80b0ad1d0cda6157d6154d627ee86af",
+  "lower_bound": "2026-09-29T10:00:00+00:00",
+  "upper_bound": "2026-09-29T11:00:00+00:00",
+  "as_of": "2026-09-29T11:00:00+00:00",
+  "lower_inclusive": false
+}

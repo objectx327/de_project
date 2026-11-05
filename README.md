@@ -3336,3 +3336,1200 @@ where customer_id is null
 |000006|C-00006|
 |000010|C-00010|
 |000014|C-00014|
+
+
+# Неделя 6 - ETL и ELT
+## Подготовка
+```
+week_06/sql/setup.sql
+week_06/sql/checks.sql
+```
+### Названия переменных окружения
+```
+$env:PGHOST = "***"
+$env:PGPORT = "***"
+$env:PGDATABASE = "***"
+$env:PGUSER = "***"
+$env:PGPASSWORD = "***"        
+```
+
+## Задание 1
+
+| Этап	| Где выполняется	| Вход	| Выход	| Условие завершения|
+|-------|-----------------|-------|-------|-------------------|
+| Получение данных	| Python	| manifest.json, orders.jsonl	| Прочитанные файлы поставки	| Файлы доступны и успешно прочитаны |
+| Staging	| Python / PostgreSQL	| Исходные строки JSONL, batch_id, run_id	| de6_stg.orders_raw	| Все исходные строки включая повторы сохранены, количество сверено, добавлены batch_id, run_id |
+| Проверка данных	| Python / PostgreSQL	| Манифест, данные из staging	| Проверенный набор записей либо ошибка	| Проверены данные на соответствие договору с источником, корректны версии, суммы, нет конфликтов | 
+| Подготовка изменений	| PostgreSQL	| Проверенные записи	| de6_stg.i_orders	| Для каждого ключа выбрана запись с максимальной версией, не более одной строки на ключ, преобразованы типы данных |
+| Публикация	| PostgreSQL	| Подготовленный набор de6_stg.i_orders, scope и время снимка	| de6_core.orders_current, обновлённые pipeline_state и load_runs	| Целевая область заменена; изменения, watermark и успешный статус зафиксированы одной транзакцией |
+| Сверка	| Python / PostgreSQL	| Подготовленный набор и опубликованные данные | Результаты контрольных запросов	| Подтверждены корректность состояния, количество, сумма и сохранность данных|
+
+### Проверка запуска
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```
+run_id: 29afb550-1aa3-4006-8b4e-0007f3ede9aa
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 4
+Сохранено в staging: 4
+Подготовлено уникальных ключей: 4
+Изменено строк: 4
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 4
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 420.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+
+```sql
+select * from de6_stg.orders_raw
+;
+select * from  de6_core.orders_current
+```
+
+|run_id|batch_id|id|row_no|decision|applied_action|source_system|order_id|source_version|operation|status|amount|updated_at|available_at|
+|------|--------|--|------|--------|--------------|-------------|--------|--------------|---------|------|------|----------|------------|
+|29afb550-1aa3-4006-8b4e-0007f3ede9aa|full_0800|1|1|applied_change||shop|000001|1|upsert|new|100.00|2026-09-29T08:00:00+00:00|2026-09-29T08:00:00+00:00|
+|29afb550-1aa3-4006-8b4e-0007f3ede9aa|full_0800|2|2|applied_change||shop|000002|2|upsert|paid|200.00|2026-09-29T08:00:00+00:00|2026-09-29T08:00:00+00:00|
+|29afb550-1aa3-4006-8b4e-0007f3ede9aa|full_0800|3|3|applied_change||shop|000003|1|upsert|new|50.00|2026-09-29T08:00:00+00:00|2026-09-29T08:00:00+00:00|
+|29afb550-1aa3-4006-8b4e-0007f3ede9aa|full_0800|4|4|applied_change||pos|000001|1|upsert|paid|70.00|2026-09-29T08:00:00+00:00|2026-09-29T08:00:00+00:00|
+
+
+|source_system|order_id|source_version|status|amount|is_deleted|t_updated_at|
+|-------------|--------|--------------|------|------|----------|------------|
+|pos|000001|1|paid|70.00|false|2026-11-05 02:55:23.425 +0100|
+|shop|000001|1|new|100.00|false|2026-11-05 02:55:23.426 +0100|
+|shop|000002|2|paid|200.00|false|2026-11-05 02:55:23.426 +0100|
+|shop|000003|1|new|50.00|false|2026-11-05 02:55:23.426 +0100|
+
+### Полная замена заданной области
+Таблицы предварительно очищены
+```sql
+insert into de6_core.orders_current (
+    source_system, order_id, source_version,
+    status, amount, is_deleted, t_updated_at
+)
+values
+    ('shop', '000001', 1, 'new', 90.00, false, clock_timestamp()),
+    ('shop', 'X', 1, 'new', 5.00, false, clock_timestamp()),
+    ('partner', '000001', 1, 'paid', 999.00, false, clock_timestamp())
+;
+select source_system, order_id, status, amount, source_version, is_deleted
+from de6_core.orders_current
+order by source_system, order_id;
+```
+
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|partner|000001|paid|999.00|1|false|
+|shop|000001|new|90.00|1|false|
+|shop|X|new|5.00|1|false|
+
+```sql
+select
+    count(*) as active_orders,
+    coalesce(sum(amount), 0) as total_amount
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+  and not is_deleted
+```
+|active_orders|total_amount|
+|-------------|------------|
+|2|95.00|
+
+
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```
+run_id: a604e162-8b58-4c70-a81b-299da33ab564
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 4
+Сохранено в staging: 4
+Подготовлено уникальных ключей: 4
+Изменено строк: 4
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 4
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 420.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+
+```sql
+SELECT source_system, order_id, status, amount, source_version, is_deleted
+FROM de6_core.orders_current
+ORDER BY source_system, order_id
+```
+
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|partner|000001|paid|999.00|1|false|
+|pos|000001|paid|70.00|1|false|
+|shop|000001|new|100.00|1|false|
+|shop|000002|paid|200.00|2|false|
+|shop|000003|new|50.00|1|false|
+
+```sql
+select
+    count(*) as active_orders,
+    coalesce(sum(amount), 0) as total_amount
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+  and not is_deleted
+```
+|active_orders|total_amount|
+|-------------|------------|
+|4|420.00|
+
+Проверка журнала
+```sql
+select run_id, batch_id, mode, status, staged_rows, prepared_rows
+from de6_etl.load_runs
+```
+|run_id|batch_id|mode|status|staged_rows|prepared_rows|
+|------|--------|----|------|-----------|-------------|
+|a604e162-8b58-4c70-a81b-299da33ab564|full_0800|full|succeeded|4|4|
+
+Проверка stage
+```sql
+select count(*) AS raw_rows
+from de6_stg.orders_raw
+```
+|raw_rows|
+|--------|
+|4|
+
+Проверка интеграционной таблицы
+```sql
+select
+    count(*) AS prepared_rows,
+    sum(amount) AS prepared_amount
+from de6_stg.i_orders
+```
+|prepared_rows|prepared_amount|
+|-------------|---------------|
+|4|420.00|
+
+Проверка watermark
+```sql
+select pipeline_name, watermark, run_id
+from de6_etl.pipeline_state
+where pipeline_name = 'orders';
+```
+|pipeline_name|watermark|run_id|
+|-------------|---------|------|
+|orders|2026-09-29 10:00:00.000 +0200|a604e162-8b58-4c70-a81b-299da33ab564|
+
+
+Повторный full load
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```
+run_id: 3bc02aee-4821-4913-b5b3-695f236059dd
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 4
+Сохранено в staging: 4
+Подготовлено уникальных ключей: 4
+Изменено строк: 4
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 4
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 420.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+```sql
+select source_system, order_id, status, amount, source_version, is_deleted
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+order by source_system, order_id;
+```
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|pos|000001|paid|70.00|1|false|
+|shop|000001|new|100.00|1|false|
+|shop|000002|paid|200.00|2|false|
+|shop|000003|new|50.00|1|false|
+
+```sql
+select
+    count(*) as active_orders,
+    coalesce(sum(amount), 0) as total_amount
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+  and not is_deleted
+```
+|active_orders|total_amount|
+|-------------|------------|
+|4|420.00|
+
+Логи запусков
+```sql
+select run_id, batch_id, mode, status, staged_rows, prepared_rows
+FROM de6_etl.load_runs
+```
+|run_id|batch_id|mode|status|staged_rows|prepared_rows|
+|------|--------|----|------|-----------|-------------|
+|3bc02aee-4821-4913-b5b3-695f236059dd|full_0800|full|succeeded|4|4|
+|a604e162-8b58-4c70-a81b-299da33ab564|full_0800|full|succeeded|4|4|
+
+### Тестовая копия
+```
+week_06/sql/setup.sql
+$env:PGDATABASE = "de_course_test"
+```
+```sql
+insert into de6_core.orders_current (
+    source_system, order_id, source_version,
+    status, amount, is_deleted, t_updated_at
+)
+values
+    ('shop', '000001', 1, 'new', 90.00, false, clock_timestamp()),
+    ('shop', 'X', 1, 'new', 5.00, false, clock_timestamp()),
+    ('partner', '000001', 1, 'paid', 999.00, false, clock_timestamp())
+;
+select source_system, order_id, status, amount, source_version, is_deleted
+from de6_core.orders_current
+order by source_system, order_id;
+```
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|partner|000001|paid|999.00|1|false|
+|shop|000001|new|90.00|1|false|
+|shop|X|new|5.00|1|false|
+
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```
+run_id: e1b66116-3fed-4e69-b50f-067ca6099425
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 4
+Сохранено в staging: 4
+Подготовлено уникальных ключей: 4
+Изменено строк: 4
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 4
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 420.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+```sql
+select source_system, order_id, status, amount, source_version, is_deleted
+from de6_core.orders_current
+order by source_system, order_id;
+```
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|partner|000001|paid|999.00|1|false|
+|pos|000001|paid|70.00|1|false|
+|shop|000001|new|100.00|1|false|
+|shop|000002|paid|200.00|2|false|
+|shop|000003|new|50.00|1|false|
+
+### Неподтвержденный пустой снимок
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/empty_full_unconfirmed/manifest.json
+```
+```
+2026-11-05 03:17:14,826 INFO event=load_started run_id=26649cfb-d917-4124-9506-353f52dcc47a batch_id=empty_full_unconfirmed mode=full
+2026-11-05 03:17:14,828 ERROR event=load_failed run_id=26649cfb-d917-4124-9506-353f52dcc47a batch_id=empty_full_unconfirmed stage=started error_code=processing_error
+Traceback (most recent call last):
+  File "...\de_project\week_06\src\load_orders.py", line 729, in run_load
+    config = validate_manifest(manifest, replay)
+  File "...\de_project\week_06\src\load_orders.py", line 156, in validate_manifest
+    raise ValueError("Снимок неполный; не допущен к загрузке")
+ValueError: Снимок неполный; не допущен к загрузке
+2026-11-05 03:17:14,835 ERROR event=program_failed
+Traceback (most recent call last):
+  File "...\de_project\week_06\src\load_orders.py", line 944, in main
+    run_id, stats = run_load(args.manifest, conn_params, replay=args.replay,
+                    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             overlap_minutes=args.overlap_minutes,
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+                             resume_run=args.resume_run,
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             )
+                             ^
+  File "...\de_project\week_06\src\load_orders.py", line 729, in run_load
+    config = validate_manifest(manifest, replay)
+  File "...\de_project\week_06\src\load_orders.py", line 156, in validate_manifest
+    raise ValueError("Снимок неполный; не допущен к загрузке")
+ValueError: Снимок неполный; не допущен к загрузке
+```
+```sql
+select
+    count(*) as active_orders,
+    coalesce(sum(amount), 0) as total_amount
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+  and not is_deleted;
+```
+|active_orders|total_amount|
+|-------------|------------|
+|4|420.00|
+
+```sql
+SELECT watermark
+FROM de6_etl.pipeline_state
+WHERE pipeline_name = 'orders'
+```
+|watermark|
+|---------|
+|2026-09-29 10:00:00.000 +0200|
+
+```sql
+select run_id, batch_id, mode, status, error_message
+from de6_etl.load_runs
+order by started_at desc
+limit 1
+```
+
+|run_id|batch_id|mode|status|error_message|
+|------|--------|----|------|-------------|
+|26649cfb-d917-4124-9506-353f52dcc47a|empty_full_unconfirmed|full|failed|ValueError: Снимок неполный; не допущен к загрузке|
+
+
+### подтвержденный пустой снимок
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/empty_full_confirmed/manifest.json
+```
+```
+run_id: 39a56c95-b999-4ddd-bbde-b92470533569
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 0
+Сохранено в staging: 0
+Подготовлено уникальных ключей: 0
+Изменено строк: 0
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 0
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 0
+Сумма: 0.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+```sql
+select source_system, order_id, status, amount, source_version, is_deleted
+from de6_core.orders_current
+order by source_system, order_id;
+```
+|source_system|order_id|status|amount|source_version|is_deleted|
+|-------------|--------|------|------|--------------|----------|
+|partner|000001|paid|999.00|1|false|
+
+### Восстановление исходного full_0800
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```
+run_id: e9d52441-e628-4229-b6b6-a1a900d2df42
+Режим: full
+Статус: succeeded; сверка пройдена
+Получено из источника: 4
+Сохранено в staging: 4
+Подготовлено уникальных ключей: 4
+Изменено строк: 4
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 4
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 420.00 EUR
+Удалено заказов: 0
+Watermark: 2026-09-29 08:00:00+00:00
+```
+```sql
+select
+    source_system,
+    count(*) as active_orders,
+    coalesce(sum(amount), 0) as total_amount
+from de6_core.orders_current
+where not is_deleted
+group by source_system
+```
+|source_system|active_orders|total_amount|
+|-------------|-------------|------------|
+|pos|1|70.00|
+|shop|3|350.00|
+|partner|1|999.00|
+
+```bash
+$env:PGDATABASE = "de_course"
+```
+## Задание 3
+### Проверка состояния базы
+```sql
+select pipeline_name, watermark 
+from de6_etl.pipeline_state 
+;
+select source_system,order_id,source_version,status,amount,is_deleted
+from de6_core.orders_current
+order by source_system,order_id
+```
+
+|pipeline_name|watermark|
+|-------------|---------|
+|orders|2026-09-29 10:00:00.000 +0200|
+
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|partner|000001|1|paid|999.00|false|
+|pos|000001|1|paid|70.00|false|
+|shop|000001|1|new|100.00|false|
+|shop|000002|2|paid|200.00|false|
+|shop|000003|1|new|50.00|false|
+
+### delta_1
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1/manifest.json
+```
+```
+run_id: 3abdd294-ac64-45bd-ae50-9cca48754c48
+Режим: delta
+Статус: succeeded; сверка пройдена
+Получено из источника: 7
+Сохранено в staging: 7
+Подготовлено уникальных ключей: 5
+Изменено строк: 4
+    identical_repeat: 1
+    old_version: 0
+    same_as_target: 1
+    updated_in_batch: 1
+    applied_change: 4
+    insert_active: 1
+    update_active: 2
+    delete_known: 1
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 280.00 EUR
+Удалено заказов: 1
+Watermark: 2026-09-29 09:00:00+00:00
+```
+```sql
+select
+    row_no,
+    source_system,
+    order_id,
+    source_version,
+    decision,
+    applied_action
+from de6_stg.orders_raw
+where run_id = (
+    select run_id
+    from de6_etl.load_runs
+    where batch_id = 'delta_1'
+      and mode = 'delta'
+      and status = 'succeeded'
+    order by started_at desc
+    limit 1
+)
+order by row_no;
+```
+|row_no|source_system|order_id|source_version|decision|applied_action|
+|------|-------------|--------|--------------|--------|--------------|
+|1|shop|000001|2|applied_change|update_active|
+|2|shop|000004|1|applied_change|insert_active|
+|3|shop|000002|3|applied_change|delete_known|
+|4|pos|000001|1|same_as_target||
+|5|shop|000001|1|updated_in_batch||
+|6|shop|000003|2|applied_change|update_active|
+|7|shop|000004|1|identical_repeat||
+
+#### Итоговое состояние 
+```sql
+select
+    source_system, order_id, source_version,
+    status, amount, is_deleted
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+order by source_system, order_id;
+```
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|pos|000001|1|paid|70.00|false|
+|shop|000001|2|paid|120.00|false|
+|shop|000002|3|||true|
+|shop|000003|2|cancelled|50.00|false|
+|shop|000004|1|new|40.00|false|
+
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos');
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|280.00|1|
+
+```sql
+select watermark
+from de6_etl.pipeline_state
+```
+|watermark|
+|---------|
+|2026-09-29 11:00:00.000 +0200|
+
+### Повтор дельты без изменения watermark
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1/manifest.json --replay
+```
+
+```
+run_id: 23434b28-0ec1-4df6-bcbc-9ab70f2a1b5b
+Режим: replay
+Статус: succeeded; сверка пройдена
+Получено из источника: 7
+Сохранено в staging: 7
+Подготовлено уникальных ключей: 5
+Изменено строк: 0
+    identical_repeat: 1
+    old_version: 0
+    same_as_target: 5
+    updated_in_batch: 1
+    applied_change: 0
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 280.00 EUR
+Удалено заказов: 1
+Watermark: 2026-09-29 11:00:00+02:00
+```
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+;
+select watermark
+from de6_etl.pipeline_state
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|280.00|1|
+
+|watermark|
+|---------|
+|2026-09-29 11:00:00.000 +0200|
+
+```sql
+select run_id, batch_id, mode, status, applied_rows
+from de6_etl.load_runs
+where batch_id = 'delta_1'
+order by started_at
+```
+
+|run_id|batch_id|mode|status|applied_rows|
+|------|--------|----|------|------------|
+|3abdd294-ac64-45bd-ae50-9cca48754c48|delta_1|delta|succeeded|4|
+|23434b28-0ec1-4df6-bcbc-9ab70f2a1b5b|delta_1|replay|succeeded|0|
+
+
+### Проверка старой версии
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/replay_old_000001/manifest.json --replay
+```
+```
+run_id: 9a7fde1a-869c-4796-a858-03551a2ab8de
+Режим: replay
+Статус: succeeded; сверка пройдена
+Получено из источника: 1
+Сохранено в staging: 1
+Подготовлено уникальных ключей: 1
+Изменено строк: 0
+    identical_repeat: 0
+    old_version: 1
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 0
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 280.00 EUR
+Удалено заказов: 1
+Watermark: 2026-09-29 11:00:00+02:00
+```
+```sql
+select source_version, status, amount
+from de6_core.orders_current
+where source_system = 'shop'
+  and order_id = '000001'
+```
+|source_version|status|amount|
+|--------------|------|------|
+|2|paid|120.00|
+
+## Задание 4
+
+### Формирование delta_1_2
+Берем строки в исходном порядке: сначала delta_1, затем delta_2. Применяем два условия:
+- available_at <= 2026-09-29 10:00 UTC
+- 2026-09-29 08:45 UTC <= updated_at <= 2026-09-29 10:00 UTC
+
+Формирование hash для delta_1_2 - добавляется в manifest.json
+```bash
+Get-FileHash -Path "week_06/DE_Week_6_Data/raw/delta_1_2/orders.jsonl" -Algorithm SHA256
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1_2/manifest.json --overlap-minutes 15
+```
+```
+run_id: bebf1f20-c6f3-4ccf-bf03-c81562d8a1ae
+Режим: delta
+Статус: succeeded; сверка пройдена
+Получено из источника: 5
+Сохранено в staging: 5
+Подготовлено уникальных ключей: 5
+Изменено строк: 3
+    identical_repeat: 0
+    old_version: 1
+    same_as_target: 1
+    updated_in_batch: 0
+    applied_change: 3
+    insert_active: 1
+    update_active: 1
+    delete_known: 0
+    delete_unknown: 1
+Активных заказов: 5
+Сумма: 315.00 EUR
+Удалено заказов: 2
+Watermark: 2026-09-29 10:00:00+00:00
+```
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+;
+select watermark
+from de6_etl.pipeline_state
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|5|315.00|2|
+
+|watermark|
+|---------|
+|2026-09-29 12:00:00.000 +0200|
+
+### Повтор удаления
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/replay_delete_000006/manifest.json --replay
+```
+```
+run_id: f9d6ebb4-4718-4840-b355-53a55222874a
+Режим: replay
+Статус: succeeded; сверка пройдена
+Получено из источника: 1
+Сохранено в staging: 1
+Подготовлено уникальных ключей: 1
+Изменено строк: 0
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 1
+    updated_in_batch: 0
+    applied_change: 0
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 5
+Сумма: 315.00 EUR
+Удалено заказов: 2
+Watermark: 2026-09-29 12:00:00+02:00
+```
+```sql
+select source_system,order_id,source_version,status,amount,is_deleted,t_updated_at
+from de6_core.orders_current
+where source_system='shop' and order_id='000006'
+```
+|source_system|order_id|source_version|status|amount|is_deleted|t_updated_at|
+|-------------|--------|--------------|------|------|----------|------------|
+|shop|000006|2|||true|2026-11-05 14:34:30.526 +0100|
+
+### Конфликт внутри поставки
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/conflict_1015/manifest.json
+```
+```sql
+select run_id,batch_id,status,stage,error_code,error_message
+from de6_etl.load_runs
+where batch_id='conflict_1015'
+order by started_at desc limit 1
+;
+select source_system,order_id,source_version,status,amount,is_deleted
+from de6_core.orders_current
+where source_system='shop' and order_id in ('000003','000007')
+order by order_id
+;
+select watermark
+from de6_etl.pipeline_state
+```
+
+|run_id|batch_id|status|stage|error_code|error_message|
+|------|--------|------|-----|----------|-------------|
+|993cbc26-c6fc-4c48-9f3c-b661f6049a48|conflict_1015|failed|publishing|processing_error|ValueError: Конфликт версий внутри поставки: ('shop', '000003', 3)|
+
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|shop|000003|2|cancelled|50.00|false|
+
+|watermark|
+|---------|
+|2026-09-29 12:00:00.000 +0200|
+
+
+### Конфликт с целевой таблицей
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/conflict_target_1015/manifest.json
+```
+```sql
+select run_id,batch_id,status,error_code,error_message
+from de6_etl.load_runs
+where batch_id='conflict_target_1015'
+order by started_at desc limit 1;
+
+select source_system,order_id,source_version,status,amount,is_deleted
+from de6_core.orders_current
+where source_system='shop' and order_id='000004';
+```
+|run_id|batch_id|status|error_code|error_message|
+|------|--------|------|----------|-------------|
+|a0bd95db-7c54-4334-a695-e08e7dc203a8|conflict_target_1015|failed|processing_error|ValueError: Конфликт равной версии с целевой таблицей: ('shop', '000004', '2')|
+
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|shop|000004|2|paid|45.00|false|
+
+
+## Задание 5
+Тестовые базы для проверок:
+```sql
+CREATE DATABASE de_course_test_fail_a OWNER de_student
+;
+CREATE DATABASE de_course_test_fail_b OWNER de_student
+```
+Выполняется в обеих базах:
+```
+week_06/sql/setup.sql
+```
+```sql
+insert into de6_core.orders_current (
+    source_system, order_id, source_version, status, amount, is_deleted, t_updated_at
+)
+values (
+    'partner', '000001', 1, 'paid', 999.00, false, clock_timestamp()
+)
+```
+```bash
+$env:PGDATABASE = "de_course_test_fail_a"
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+
+$env:PGDATABASE = "de_course_test_fail_b"
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/full_0800/manifest.json
+```
+```sql
+select current_database(),
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|current_database|active_orders|total_amount|deleted_orders|
+|----------------|-------------|------------|--------------|
+|de_course_test_fail_a|4|420.00|0|
+
+|current_database|active_orders|total_amount|deleted_orders|
+|----------------|-------------|------------|--------------|
+|de_course_test_fail_b|4|420.00|0|
+
+### Сценарий А. Сбой после staging
+```bash
+$env:PGDATABASE = "de_course_test_fail_a"
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1/manifest.json --fail-after-staging
+```
+```sql
+select run_id,batch_id,status,stage,staging_ready,staged_rows,error_code
+from de6_etl.load_runs
+where batch_id='delta_1' and status='failed'
+order by started_at desc limit 1
+```
+|run_id|batch_id|status|stage|staging_ready|staged_rows|error_code|
+|------|--------|------|-----|-------------|-----------|----------|
+|e874fcbb-ce29-43de-bf80-83aca368ee69|delta_1|failed|staging_ready|true|7|test_after_staging|
+
+```sql
+select count(*) as saved_rows
+from de6_stg.orders_raw
+where run_id in (select run_id from de6_etl.load_runs
+	where batch_id='delta_1'
+	order by started_at desc limit 1)
+```
+|saved_rows|
+|----------|
+|7|
+
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|420.00|0|
+
+```sql
+select watermark
+from de6_etl.pipeline_state
+```
+|watermark|
+|---------|
+|2026-09-29 10:00:00.000 +0200|
+
+```bash
+python week_06/src/load_orders.py --resume-run e874fcbb-ce29-43de-bf80-83aca368ee69
+```
+```
+run_id: ed0dfed8-d801-42d9-bd74-9199a0db10bf
+Режим: delta
+Статус: succeeded; сверка пройдена
+Получено из источника: 7
+Сохранено в staging: 7
+Подготовлено уникальных ключей: 5
+Изменено строк: 4
+    identical_repeat: 1
+    old_version: 0
+    same_as_target: 1
+    updated_in_batch: 1
+    applied_change: 4
+    insert_active: 1
+    update_active: 2
+    delete_known: 1
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 280.00 EUR
+Удалено заказов: 1
+Watermark: 2026-09-29 09:00:00+00:00
+```
+```sql
+select run_id,batch_id,status,stage,staging_ready,staged_rows,error_code
+from de6_etl.load_runs
+where batch_id='delta_1'
+order by started_at desc limit 1
+```
+|run_id|batch_id|status|stage|staging_ready|staged_rows|error_code|
+|------|--------|------|-----|-------------|-----------|----------|
+|ed0dfed8-d801-42d9-bd74-9199a0db10bf|delta_1|succeeded|succeeded|true|7||
+
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|280.00|1|
+
+```sql
+select watermark
+from de6_etl.pipeline_state
+```
+|watermark|
+|---------|
+|2026-09-29 11:00:00.000 +0200|
+
+### Сценарий Б. Сбой внутри публикации
+```bash
+$env:PGDATABASE = "de_course_test_fail_b" 
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1/manifest.json --fail-inside-publication
+```
+```sql
+select run_id,batch_id,status,stage,staging_ready,staged_rows,error_code
+from de6_etl.load_runs
+where batch_id='delta_1' 
+order by started_at desc limit 1
+```
+|run_id|batch_id|status|stage|staging_ready|staged_rows|error_code|
+|------|--------|------|-----|-------------|-----------|----------|
+|75d9c949-dbe6-4633-9915-3acfc7ecadef|delta_1|failed|publishing|true|7|test_in_publication|
+
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|420.00|0|
+
+```sql
+select watermark
+from de6_etl.pipeline_state
+```
+|watermark|
+|---------|
+|2026-09-29 10:00:00.000 +0200|
+
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/raw/delta_1/manifest.json
+```
+```
+run_id: fcaa9aef-f80e-42f1-a908-e2e69cc3fd80
+Режим: delta
+Статус: succeeded; сверка пройдена
+Получено из источника: 7
+Сохранено в staging: 7
+Подготовлено уникальных ключей: 5
+Изменено строк: 4
+    identical_repeat: 1
+    old_version: 0
+    same_as_target: 1
+    updated_in_batch: 1
+    applied_change: 4
+    insert_active: 1
+    update_active: 2
+    delete_known: 1
+    delete_unknown: 0
+Активных заказов: 4
+Сумма: 280.00 EUR
+Удалено заказов: 1
+Watermark: 2026-09-29 09:00:00+00:00
+```
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|4|280.00|1|
+
+```sql
+select watermark
+from de6_etl.pipeline_state
+```
+|watermark|
+|---------|
+|2026-09-29 11:00:00.000 +0200|
+
+
+### Сценарий В. Результат COMMIT неизвестен клиенту
+Потеря подтверждения COMMIT не означает доказанный откат. Нужно: дождаться завершения прежней попытки, открыть новое подключение, проверить статус запуска в load_runs и стадию, на которой упал расчет, pipeline_state.watermark, строки и версии в orders_current. Если succeeded, граница и бизнес-состояние согласованно показывают публикацию - повторение не нужно; если подтверждено, что успешной фиксации не было, данные и watermark остались исходными - стоит зафиксировать failed отдельной транзакцией и повторить сохраненный batch с новым run_id, проверить результат. 
+
+## Задание 6
+```bash
+$env:PGDATABASE = "de_course"
+```
+Первый путь: ззагрузка эталонного снимка в отдельную тестовую таблицу
+```sql
+create table if not exists de6_stg.reference_full_1000 (
+    source_system text not null,
+    order_id text not null,
+    status text not null,
+    amount numeric(12,2) not null,
+    source_version bigint not null,
+    primary key (source_system, order_id)
+)
+;
+truncate de6_stg.reference_full_1000
+;
+insert into de6_stg.reference_full_1000
+    (source_system,order_id,status,amount,source_version)
+values
+    ('shop','000001','paid',120.00,2),
+    ('shop','000003','cancelled',50.00,2),
+    ('shop','000004','paid',45.00,2),
+    ('shop','000005','paid',30.00,1),
+    ('pos','000001','paid',70.00,1);
+```
+
+Второй путь: full_0800, затем delta_1 и delta_2 с перекрытием
+
+Контроль конечного состояния
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|5|315.00|2|
+
+Контроль удаления
+```sql
+select source_system, order_id, source_version,
+       status, amount, is_deleted
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+  and is_deleted
+order by source_system, order_id;
+```
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|shop|000002|3|||true|
+|shop|000006|2|||true|
+
+
+Сверки (должно быть 0 записей в результате):
+```sql
+--сравнение по ключам
+with actual as (
+    select source_system,order_id,status,amount,source_version
+    from de6_core.orders_current
+    where source_system in ('shop','pos') and not is_deleted
+), expected as (
+    select source_system,order_id,status,amount,source_version
+    from de6_stg.reference_full_1000
+)
+select 'extra_in_target' as problem,a.*
+from (select * from actual except all select * from expected) a
+union all
+select 'missing_in_target' as problem,e.*
+from (select * from expected except all select * from actual) e
+;
+--проверка заполнения атрибутов 
+select * from de6_core.orders_current
+where source_system is null or btrim(source_system)=''
+   or order_id is null or btrim(order_id)=''
+   or source_version is null or source_version<=0
+   or is_deleted is null or t_updated_at is null
+   or (is_deleted and (status is not null or amount is not null))
+   or (not is_deleted and (status is null
+       or status not in ('new','paid','cancelled')
+       or amount is null or amount<=0))
+;
+--дубли по ключам
+select source_system,order_id,count(*) as n
+from de6_core.orders_current group by source_system,order_id
+having count(*)>1
+```
+
+
+## Задание 7
+### Вопрос 1
+> Руководитель предлагает удалить из цели всё, чего нет в очередной дельте. Какие корректные данные это уничтожит? Когда отсутствие ключа действительно позволяет удалить объект? <br />
+
+Дельта содержит только изменения за определенный период, а не полный список существующших заказов, поэтому отсутствие заказа в дельте не означает, что он удален из иссточника. Если удалить из orders_current все отсутствующие в дельте ключи, мы потеряем корректные данные.
+
+Отсутствие ключа позволяет удалить объект только если источником был предоставлен подтверденнный полный список для области, только в этом случае отсутствие ключа в пачке = его удаление.
+
+### Вопрос 2
+> Разработчик предлагает хранить MAX(source_version) всех заказов как общий watermark. Покажите на разных ключах, какое обновление будет потеряно. Почему loaded_at также не заменяет порядок изменений источника?<br /> 
+
+Актуальность определяется по source_version каждого отдельного заказа, это не версия полного набора данных. Пример - текущее состояние orders_current:
+
+|source_system|order_id|source_version|status|amount|is_deleted|
+|-------------|--------|--------------|------|------|----------|
+|partner|000001|1|paid|999.00|false|
+|pos|000001|1|paid|70.00|false|
+|shop|000005|1|paid|30.00|false|
+|shop|000001|2|paid|120.00|false|
+|shop|000003|2|cancelled|50.00|false|
+|shop|000004|2|paid|45.00|false|
+|shop|000006|2|||true|
+|shop|000002|3|||true|
+
+Если мы будем ориентироваться на максимальную версию, то мы потеряем почти все записи, т.к. они не были изменены инкрементом и остались при своих прежних версиях, но при этом актуальными. Дата загрузки также не заменяет порядок изменений источника, т.к. это техническое время записи в постгре, она не несет за собой бизнес-смысл.
+
+### Вопрос 3
+> Источник перестал обновлять updated_at при исправлении суммы и физически удаляет строки без сообщений. Какие изменения перестанет видеть текущая загрузка? Предложите два варианта изменения процесса или договора с источником.<br /> 
+
+В нашем процессе выборка delta осуществляется по updated_at. Если источник исправил сумму заказа, но не обновил метку, то изменение может остаться за пределами нового интервала, даже если увеличится source_version, это касается и удаления записи. 
+
+Варианты решения:
+1. Изменить договор с источником - требовать обновления updated_at и увеличения версии при каждом изменении значимых полей, удаления передавать как отдельные события с новой версией
+2. Добавить периодическую сверку с полным снимком - источник предоставляет подтвержденный полный набор актуальных заказов, он сравнивается с текущим набором данных в базе, данные актуализируются, но важно сохранять информацию о версиях и удалениях, чтобы долеты более старых событий позже не восстановили уже удаленные заказы
+
+### Вопрос 4
+> Запись стала доступна в 10:30, но имеет updated_at = 08:20. Обнаружит ли её перекрытие 15 минут при watermark = 10:00? Опишите способ сверки или повторной обработки за пределами окна.<br /> 
+
+Не обнаружит, т.к. не выполнится условие updated_at >= 09:45 - запись не попадет в окно. Можно периодически сверять таблицу с полным снимком источника, без ограничения на 15-минутное окно, либо дополнительно обрабатывать available_at, если источник позволит извлекать записи по времени их доступности.
+
+### Вопрос 5
+> Достаточно ли заменить статус на SUCCESS сразу после INSERT? Укажите, какие условия ещё должны быть выполнены. Опишите восстановление после одного из сбоев<br /> 
+
+Перед установкой success необходимо подтвердить следующее:
+1. Исходная поставка получена полностью, проверен хэш, полнота выгрузки и количество записей
+2. Все записи прошли проверки, отсутствуют конфликты
+3. Отсутствуют дубли по ключам
+4. Изменения корректно легли в целевую таблицу, включая обновления, пропуски старых версий и логические удаления
+5. Колилчество факктически примененных изменений соответствует рассчитанным решениям, контрольные проверки завершились успешно
+
+По завершению всех проверок новая watermark и статус SUCCESS должны фиксироваться одной транзакцией. Если публикация завершилась с ошибкой, то транзакция доллжна быть отмененя, статус FAILED записан отдельно после отката.
+
+Пример восстановления после сбоя - задание 5Б. Во время применения delta_1 загрузчик меняет первую запись orders_current, после чего намеренно возникает исключение. Поскольку изменение выполнялось внутри транзакции, постгре откатывает его, целевая таблица остается в исходном состоянии, watermark не продвигается, логи неуспешного запуска сохраняются вместе с причиной ошибки. После устранения причины сбоя запускается новая попытка - данные проходят повторную проверку и публикацию.
