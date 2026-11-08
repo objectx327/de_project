@@ -9,18 +9,6 @@ select * from de6_stg.i_orders
 select * from  de6_core.orders_current
 
 ;
---Полная замена заданной области
-INSERT INTO de6_core.orders_current (
-    source_system, order_id, source_version,
-    status, amount, is_deleted, t_updated_at
-)
-VALUES
-    ('shop', '000001', 1, 'new', 90.00, false, clock_timestamp()),
-    ('shop', 'X', 1, 'new', 5.00, false, clock_timestamp()),
-    ('partner', '000001', 1, 'paid', 999.00, false, clock_timestamp())
-;
-
-;
 SELECT source_system, order_id, status, amount, source_version, is_deleted
 FROM de6_core.orders_current
 ORDER BY source_system, order_id
@@ -109,6 +97,38 @@ where source_system in ('shop', 'pos')
 select watermark
 from de6_etl.pipeline_state
 ;
+create temp table before_empty_delta as
+select *
+from de6_core.orders_current
+;
+with differences as (
+    (
+        select * from de6_core.orders_current
+        except all
+        select * from before_empty_delta
+    )
+    union all
+    (
+        select * from before_empty_delta
+        except all
+        select * from de6_core.orders_current
+    )
+)
+select *
+from differences
+;
+select
+    run_id,
+    batch_id,
+    mode,
+    status,
+    staged_rows,
+    prepared_rows,
+    applied_rows,
+    staging_ready
+from de6_etl.load_runs
+where batch_id = 'empty_delta_1000_1100'
+;
 select source_version, status, amount
 from de6_core.orders_current
 where source_system = 'shop'
@@ -141,25 +161,6 @@ order by started_at desc limit 1;
 select source_system,order_id,source_version,status,amount,is_deleted
 from de6_core.orders_current
 --where source_system='shop' and order_id='000004'
-;
-create table if not exists de6_stg.reference_full_1000 (
-    source_system text not null,
-    order_id text not null,
-    status text not null,
-    amount numeric(12,2) not null,
-    source_version bigint not null,
-    primary key (source_system, order_id)
-);
-truncate de6_stg.reference_full_1000
-;
-insert into de6_stg.reference_full_1000
-    (source_system,order_id,status,amount,source_version)
-values
-    ('shop','000001','paid',120.00,2),
-    ('shop','000003','cancelled',50.00,2),
-    ('shop','000004','paid',45.00,2),
-    ('shop','000005','paid',30.00,1),
-    ('pos','000001','paid',70.00,1);
 ;
 with actual as (
     select source_system,order_id,status,amount,source_version

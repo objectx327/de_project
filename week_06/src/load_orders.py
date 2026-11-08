@@ -474,15 +474,9 @@ def classify_orders(cur, run_id, config):
         )
     return decision_counts, action_counts
 
-    
-
-def publish_orders(cur, run_id, config, expected_applied, fail_inside_publication=False, decision_counts=None, action_counts=None):
+def publish_orders(cur, run_id, config, expected_applied, fail_inside_publication=False): #, decision_counts=None, action_counts=None):
     mode = config["mode"]
     scope = config["scope"]
-
-    cur.execute("SELECT watermark FROM de6_etl.pipeline_state WHERE pipeline_name = 'orders'")
-    state = cur.fetchone()
-    watermark = None if state is None else state[0]
 
     if mode == "full":
         cur.execute("DELETE FROM de6_core.orders_current WHERE source_system=ANY(%s)", (scope,))
@@ -569,115 +563,122 @@ def publish_orders(cur, run_id, config, expected_applied, fail_inside_publicatio
     if applied != expected_applied:
         raise RuntimeError(f"Применено {applied} строк вместо ожидаемых {expected_applied}")
 
-    if mode in ("full", "delta"):
-        watermark = config["upper"]
-        cur.execute(
-            """
-            INSERT INTO de6_etl.pipeline_state (pipeline_name, watermark, run_id, updated_at)
-            VALUES ('orders', %s, %s, clock_timestamp())
-            ON CONFLICT (pipeline_name) DO UPDATE SET
-                watermark = EXCLUDED.watermark,
-                run_id = EXCLUDED.run_id,
-                updated_at = EXCLUDED.updated_at
-            """,
-            (watermark, run_id),
-        )
+    return applied
+
+#вынесла проверки бизнес-резуьтата
+def check_business_state(cur, run_id, config, outside_before, inside_before):
+    #системы, которые в скоупе
+    cur.execute(
+        """
+        SELECT source_system, order_id, source_version, status, amount, is_deleted, t_updated_at
+        FROM de6_core.orders_current
+        WHERE source_system=ANY(%s)
+        ORDER BY source_system, order_id
+        """,
+        (config["scope"],),
+    )
+    current_full = cur.fetchall()
+    current = {row[:2]: row for row in current_full}
+    previous = {row[:2]: row for row in inside_before}
 
     cur.execute(
         """
-        UPDATE de6_etl.load_runs
-        SET status='succeeded', stage='succeeded', finished_at=clock_timestamp(), error_message=NULL, 
-            applied_rows=%s, decision_counts=%s, action_counts=%s
+        SELECT source_system, order_id, source_version, status, amount, operation='delete'
+        FROM de6_stg.i_orders 
         WHERE run_id=%s
+        ORDER BY source_system, order_id
         """, 
-        (applied, Jsonb(dict(decision_counts or {})), Jsonb(dict(action_counts or {})), run_id),
+        (run_id,),
     )
-    return applied, watermark
+    prepared = cur.fetchall()
+
+    if config["mode"] == "full":
+        if [row[:6] for row in current_full] != prepared:
+            raise RuntimeError("Цель не совпадает с подготовленным полным снимком")
+    else:
+        incoming = {row[:2]: row for row in prepared}
+        #текущий набор не равен предыдущий + дельта
+        if set(current) != set(previous) | set(incoming):
+            raise RuntimeError("Пропущены/появились новые ключи")
+        for key in set(previous) | set(incoming):
+            old = previous.get(key)
+            new = incoming.get(key)
+            saved = current[key]
+            if new is not None and (old is None or new[2] > old[2]):
+                if saved[:6] != new:
+                    raise RuntimeError(f"Неверные бизнес-поля {key}")
+            elif saved != old:
+                raise RuntimeError(f"Старый/пропущеный заказ изменился {key}")
+            
+    #системы, которые не в скоупе
+    cur.execute(
+        """
+        SELECT * FROM de6_core.orders_current
+        WHERE NOT (source_system=ANY(%s))
+        ORDER BY source_system, order_id
+        """,
+        (config["scope"],),
+    )
+    if cur.fetchall() != outside_before:
+        raise RuntimeError("Изменились данные вне scope")
+    
+    if config["mode"] == "replay" and current_full != inside_before:
+        raise RuntimeError("replay изменил целевую таблицу")
+    #неудаленные записи
+    active = [row for row in current_full if not row[5]]
+    total_amount = sum((row[4] for row in active), Decimal("0.00"))
+    
+    load_stats = {
+        "active_orders": len(active),
+        "deleted_orders": len(current_full) - len(active),
+        "total_amount": total_amount,
+    }
+    return load_stats
+    
 
 
 def verify_load(conn_params, run_id, config, outside_before, inside_before, watermark):
     with psycopg.connect(**conn_params, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT source_system, order_id, source_version, status, amount, is_deleted
-                FROM de6_core.orders_current
-                WHERE source_system IN ('shop', 'pos')
-                ORDER BY source_system, order_id
-                """
-            )
-            current = cur.fetchall()
-
-            cur.execute(
-                """
-                SELECT source_system, order_id, source_version, status, amount, operation='delete'
-                FROM de6_stg.i_orders 
-                WHERE run_id=%s
-                ORDER BY source_system, order_id
-                """, 
-                (run_id,),
-            )
-            prepared = cur.fetchall()
-
-            if config["mode"] == "full":
-                if current != prepared:
-                    raise RuntimeError("Цель не совпадает с подготовленным полным снимком")
-
-            else:
-                #сверка по кюлчам
-                by_key = {}
-                for row in current:
-                    key = (row[0], row[1])
-                    by_key[key] = row
-
-                for incoming in prepared:
-                    saved = by_key.get(incoming[:2])
-                    if saved is None or saved[2] < incoming[2]:
-                        raise RuntimeError(f"Изменение не примено: {incoming[:2]}")
-                    if saved[2] == incoming[2] and saved != incoming:
-                        raise RuntimeError(f"Бизнес-атрибуты не совпадают: {incoming[:2]}")
-
-            cur.execute(
-                """
-                SELECT * 
-                FROM de6_core.orders_current
-                WHERE NOT (source_system=ANY(%s)) 
-                ORDER BY source_system, order_id
-                """,
-                (config["scope"],),
-            )
-            if cur.fetchall() != outside_before:
-                raise RuntimeError("Изменились данные вне scope")
-            if config["mode"] == "replay":
-                cur.execute(
-                    """
-                    SELECT * FROM de6_core.orders_current
-                    WHERE source_system=ANY(%s) 
-                    ORDER BY source_system, order_id
-                    """, (config["scope"],),
-                )
-                if cur.fetchall() != inside_before:
-                    raise RuntimeError("replay изменил целевую таблицу")
-
+            stats = check_business_state(cur, run_id, config, outside_before, inside_before)
             cur.execute("SELECT watermark FROM de6_etl.pipeline_state WHERE pipeline_name='orders'")
             state = cur.fetchone()
             if state is None or state[0] != watermark:
                 raise RuntimeError("Некорректный watermark после публикации")
             cur.execute("SELECT status FROM de6_etl.load_runs WHERE run_id=%s", (run_id,))
             status = cur.fetchone()[0]
-            if status != "succeeded":
+            if status is None or status != "succeeded":
                 raise RuntimeError("Не подтверждена успешная публикация")
 
-    active = [row for row in current if not row[5]]
-    total_amount = sum((row[4] for row in active), Decimal("0.00"))
+    stats["watermark"] = watermark
+    return stats
 
-    load_stats = {
-        "active_orders": len(active),
-        "deleted_orders": len(current) - len(active),
-        "total_amount": total_amount,
-        "watermark": watermark,
-    }
-    return load_stats
+#отпечаток длял контроля
+def staging_fingerprint(cur, run_id):
+    cur.execute(
+        """
+        SELECT 
+            row_no, 
+            batch_id, 
+            source_system, 
+            order_id, 
+            source_version, 
+            operation, 
+            status, 
+            amount, 
+            updated_at, 
+            available_at
+        FROM de6_stg.orders_raw
+        WHERE run_id=%s
+        ORDER BY row_no
+        """,
+        (run_id,),
+    )
+    rows = cur.fetchall()
+
+    orders_raw = json.dumps(rows, ensure_ascii=False)
+    digest = hashlib.sha256(orders_raw.encode("utf-8")).hexdigest()
+    return digest, rows
 
 
 def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0, 
@@ -691,14 +692,14 @@ def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0,
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT batch_id, manifest, status, staging_ready, lower_bound, read_start
+                    SELECT batch_id, manifest, status, staging_ready, lower_bound, read_start, staging_hash
                     FROM de6_etl.load_runs WHERE run_id=%s
                     """,
                     (resume_run,),
                 )
                 source = cur.fetchone()
-            if source is None or source[2] != "failed" or not source[3]:
-                raise ValueError("Нужна проваленная попытка запуска с staging_ready = true")
+            if source is None or source[2] != "failed" or not source[3] or not source[6]:
+                raise ValueError("Нужна проваленная попытка запуска с staging_ready = true и хэшем")
             manifest = source[1]
 
             if source[4] is not None and source[5] is not None:
@@ -770,7 +771,12 @@ def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0,
                     except ValueError as error:
                         raise ValueError(f"Строка {line_number}: {error}") from error
             else:
+                stage = "resume_validation"
                 with conn.transaction(), conn.cursor() as cur:
+                    original_hash, original_rows = staging_fingerprint(cur, resume_run)
+                    if original_hash != source[6] or len(original_rows) != config["expected_count"]:
+                        raise ValueError("Сохраненный staging изменился")
+                    
                     cur.execute(
                         """
                         INSERT INTO de6_stg.orders_raw(
@@ -785,18 +791,8 @@ def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0,
                         """, (run_id, resume_run),
                     )
                     staged = cur.rowcount
-                    cur.execute(
-                        """
-                        SELECT count(*), count(DISTINCT row_no), min(row_no), max(row_no)
-                        FROM de6_stg.orders_raw 
-                        WHERE run_id=%s  
-                        """, (run_id,),
-                    )
-                    count_rows, distinct_rows, min_row, max_row = cur.fetchone()
-                    expected_count = config["expected_count"]
-                    if (staged != expected_count 
-                        or count_rows != expected_count 
-                        or distinct_rows != expected_count):
+                    copied_hash, copied_rows = staging_fingerprint(cur, run_id)
+                    if copied_hash != original_hash or staged != config["expected_count"] or staged != len(copied_rows):
                         raise ValueError("Восстановленный stage неполный")
                     stats["received"] = staged
                     stats["staged_rows"] = staged
@@ -808,15 +804,36 @@ def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0,
                         """, (staged, run_id),
                     )
 
+
+                for row in copied_rows:
+                    row_no, batch_id, *fields = row
+                    if batch_id != manifest["batch_id"]:
+                        raise ValueError(f"{row_no}: изменился batch_id")
+                    
+                    record = {}
+                    for i, field in enumerate(REQUIRED_FIELDS):
+                        record[field] = fields[i]
+
+                    version = record["source_version"]
+                    record["source_version"] = int(version)
+
+                    try:
+                        validate_order(record, config)
+                    except ValueError as error:
+                        raise ValueError(f"Восстановленная строка {row_no}: {error}") from error
+                    
             stage = "staging_ready"
 
             with conn.transaction(), conn.cursor() as cur:
+                digest, staged_rows = staging_fingerprint(cur, run_id)
+                if len(staged_rows) != stats["staged_rows"]:
+                    raise ValueError("Количество строк staging изменилось")
                 cur.execute(
                     """
                     UPDATE de6_etl.load_runs
-                    SET staging_ready=true, stage='staging_ready'
+                    SET staging_ready=true, staging_hash=%s, stage='staging_ready'
                     WHERE run_id=%s
-                    """, (run_id,),
+                    """, (digest, run_id),
                 )
             logger.info("event=staging_ready run_id=%s batch_id=%s rws=%s", run_id, manifest["batch_id"], stats["staged_rows"])
 
@@ -865,10 +882,39 @@ def run_load(manifest_path, conn_params, replay=False, overlap_minutes=0,
                 if config["mode"] != "full" and sum(action_counts.values()) != expected_applied:
                     raise RuntimeError("Не всем изменениям назначено действие")
 
-                stats["applied_rows"], watermark = publish_orders(cur, run_id, config, expected_applied,
+                stats["applied_rows"] = publish_orders(cur, run_id, config, expected_applied,
                                                                   fail_inside_publication=fail_inside_publication, 
-                                                                  decision_counts=decision_counts, action_counts=action_counts,
                                                                   )
+                checked = check_business_state(cur, run_id, config, outside_before, inside_before)
+                logger.info("event=precommit_verified run_id=%s batch_id=%s active=%s total=%s",
+                            run_id, manifest["batch_id"], checked["active_orders"], checked["total_amount"])
+
+                cur.execute("SELECT watermark FROM de6_etl.pipeline_state WHERE pipeline_name='orders'")
+                state = cur.fetchone()
+                watermark = None if state is None else state[0]
+                if config["mode"] in ("full", "delta"):
+                    watermark = config["upper"]
+                    cur.execute(
+                        """
+                        INSERT INTO de6_etl.pipeline_state (pipeline_name, watermark, run_id, updated_at)
+                        VALUES ('orders', %s, %s, clock_timestamp())
+                        ON CONFLICT (pipeline_name) DO UPDATE SET
+                            watermark = EXCLUDED.watermark,
+                            run_id = EXCLUDED.run_id,
+                            updated_at = EXCLUDED.updated_at
+                        """,
+                        (watermark, run_id),
+                    )
+
+                cur.execute(
+                    """
+                    UPDATE de6_etl.load_runs
+                    SET status='succeeded', stage='succeeded', finished_at=clock_timestamp(), error_message=NULL, 
+                        applied_rows=%s, decision_counts=%s, action_counts=%s
+                    WHERE run_id=%s
+                    """, 
+                    (stats["applied_rows"], Jsonb(dict(decision_counts or {})), Jsonb(dict(action_counts or {})), run_id),
+                )
 
             stats["decisions"] = decision_counts
             stats["actions"] = action_counts

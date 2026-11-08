@@ -28,6 +28,7 @@ create table if not exists de6_etl.load_runs (
     scope           jsonb,
     lower_bound     timestamptz,
     upper_bound     timestamptz,
+    staging_hash    text,
     check (
         mode in ('full', 'delta', 'replay')
     )

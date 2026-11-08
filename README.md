@@ -4021,7 +4021,43 @@ where source_system = 'shop'
 ## Задание 4
 
 ### Формирование delta_1_2
-Берем строки в исходном порядке: сначала delta_1, затем delta_2. Применяем два условия:
+Сначала объединяем 7 строк delta_1 и 4 строки delta_2 без сортировки и удаления повторов. 
+
+#### Результат без перекрытия:
+При available_at <= 10:00 и (09:00; 10:00] по updated_at остаются 3 строки, все из delta_2.
+
+Запись shop/000005 v1 с updated_at=08:55, available_at=09:05 будет потеряна: до 09:00 она ещё недоступна, после 09:00 не проходит по времени изменения. Строка shop/000003 v2 на границе 09:00 уже обработана в delta_1.
+
+```sql
+select
+    row_no,
+    source_system,
+    order_id,
+    source_version,
+    updated_at,
+    available_at
+from de6_stg.orders_raw
+where run_id in (
+    select run_id
+    from de6_etl.load_runs
+    where batch_id = 'delta_1_2'
+    order by started_at desc
+    limit 1
+)
+and available_at::timestamptz <= '2026-09-29 10:00:00+00'
+and updated_at::timestamptz > '2026-09-29 09:00:00+00'
+and updated_at::timestamptz <= '2026-09-29 10:00:00+00'
+order by row_no;
+```
+|row_no|source_system|order_id|source_version|updated_at|available_at|
+|------|-------------|--------|--------------|----------|------------|
+|3|shop|000002|2|2026-09-29T09:10:00+00:00|2026-09-29T09:10:00+00:00|
+|4|shop|000006|2|2026-09-29T09:20:00+00:00|2026-09-29T09:20:00+00:00|
+|5|shop|000004|2|2026-09-29T10:00:00+00:00|2026-09-29T10:00:00+00:00|
+
+
+#### Результат с перекрытием 15 минут:
+Рабочая выборка с перекрытием 15 минут: берем строки в исходном порядке - сначала delta_1, затем delta_2. Применяем два условия:
 - available_at <= 2026-09-29 10:00 UTC
 - 2026-09-29 08:45 UTC <= updated_at <= 2026-09-29 10:00 UTC
 
@@ -4070,6 +4106,129 @@ from de6_etl.pipeline_state
 |watermark|
 |---------|
 |2026-09-29 12:00:00.000 +0200|
+
+```sql
+select
+    row_no,
+    source_system,
+    order_id,
+    source_version,
+    updated_at,
+    available_at
+from de6_stg.orders_raw
+where run_id in (
+    select run_id
+    from de6_etl.load_runs
+    where batch_id = 'delta_1_2'
+    order by started_at desc
+    limit 1
+)
+order by row_no;
+```
+
+|row_no|source_system|order_id|source_version|updated_at|available_at|
+|------|-------------|--------|--------------|----------|------------|
+|1|shop|000003|2|2026-09-29T09:00:00+00:00|2026-09-29T09:00:00+00:00|
+|2|shop|000005|1|2026-09-29T08:55:00+00:00|2026-09-29T09:05:00+00:00|
+|3|shop|000002|2|2026-09-29T09:10:00+00:00|2026-09-29T09:10:00+00:00|
+|4|shop|000006|2|2026-09-29T09:20:00+00:00|2026-09-29T09:20:00+00:00|
+|5|shop|000004|2|2026-09-29T10:00:00+00:00|2026-09-29T10:00:00+00:00|
+
+### empty_delta_1000_1100 после состояния на 10:00
+До запуска:
+```sql
+select
+    count(case when not is_deleted then 1 end) as active_orders,
+    sum(case when not is_deleted then amount else 0 end) as total_amount,
+    count(case when is_deleted then 1 end) as deleted_orders
+from de6_core.orders_current
+where source_system in ('shop', 'pos')
+;
+select watermark
+from de6_etl.pipeline_state
+```
+|active_orders|total_amount|deleted_orders|
+|-------------|------------|--------------|
+|5|315.00|2|
+
+|watermark|
+|---------|
+|2026-09-29 12:00:00.000 +0200|
+
+```sql
+create temp table before_empty_delta as
+select *
+from de6_core.orders_current
+```
+
+```bash
+python week_06/src/load_orders.py --manifest week_06/DE_Week_6_Data/fixtures/empty_delta_1000_1100/manifest.json
+```
+```
+run_id: aac772e9-c9b6-450e-aeed-566b4f0047a8
+Режим: delta
+Статус: succeeded; сверка пройдена
+Получено из источника: 0
+Сохранено в staging: 0
+Подготовлено уникальных ключей: 0
+Изменено строк: 0
+    identical_repeat: 0
+    old_version: 0
+    same_as_target: 0
+    updated_in_batch: 0
+    applied_change: 0
+    insert_active: 0
+    update_active: 0
+    delete_known: 0
+    delete_unknown: 0
+Активных заказов: 5
+Сумма: 315.00 EUR
+Удалено заказов: 2
+Watermark: 2026-09-29 11:00:00+00:00
+```
+```sql
+with differences as (
+    (
+        select * from de6_core.orders_current
+        except all
+        select * from before_empty_delta
+    )
+    union all
+    (
+        select * from before_empty_delta
+        except all
+        select * from de6_core.orders_current
+    )
+)
+select *
+from differences
+--Результат: 0 записей
+;
+select watermark
+from de6_etl.pipeline_state
+--Данные не изменились, но сдвинулась метка на 11:00 UTC
+```
+
+|watermark|
+|---------|
+|2026-09-29 13:00:00.000 +0200|
+
+```sql
+select
+    run_id,
+    batch_id,
+    mode,
+    status,
+    staged_rows,
+    prepared_rows,
+    applied_rows,
+    staging_ready
+from de6_etl.load_runs
+where batch_id = 'empty_delta_1000_1100'
+```
+|run_id|batch_id|mode|status|staged_rows|prepared_rows|applied_rows|staging_ready|
+|------|--------|----|------|-----------|-------------|------------|-------------|
+|aac772e9-c9b6-450e-aeed-566b4f0047a8|empty_delta_1000_1100|delta|succeeded|0|0|0|true|
 
 ### Повтор удаления
 ```bash
@@ -4504,7 +4663,7 @@ having count(*)>1
 |shop|000006|2|||true|
 |shop|000002|3|||true|
 
-Если мы будем ориентироваться на максимальную версию, то мы потеряем почти все записи, т.к. они не были изменены инкрементом и остались при своих прежних версиях, но при этом актуальными. Дата загрузки также не заменяет порядок изменений источника, т.к. это техническое время записи в постгре, она не несет за собой бизнес-смысл.
+Если принять общий MAX(source_version)=3 (его задаёт shop/000002) за watermark и извлекать только события с source_version > 3, уже сохраненные записи сами по себе не исчезнут, но мы потеряем новые изменения других ключей. Например, shop/000005 загружен с версией 1, затем его статус или сумма меняется и источник присылает версию 2. Для этого заказа 2 > 1 - корректное обновление, но общий фильтр 2 > 3 его отвергнет. t_updated_at (аналог loaded_at) - момент применения в нашей БД, а не версия источника: задержанная старая версия может поступить позже новой, и при повторе полного снимка техническое время меняется без изменения бизнеса.
 
 ### Вопрос 3
 > Источник перестал обновлять updated_at при исправлении суммы и физически удаляет строки без сообщений. Какие изменения перестанет видеть текущая загрузка? Предложите два варианта изменения процесса или договора с источником.<br /> 
