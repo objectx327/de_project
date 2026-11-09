@@ -1,0 +1,4 @@
+{"source_system": "shop", "order_id": "000003", "source_version": 3, "operation": "upsert", "status": "paid", "amount": "55.00", "updated_at": "2026-09-29T10:15:00+00:00", "available_at": "2026-09-29T10:15:00+00:00"}
+{"source_system": "shop", "order_id": "000003", "source_version": 3, "operation": "upsert", "status": "cancelled", "amount": "55.00", "updated_at": "2026-09-29T10:15:00+00:00", "available_at": "2026-09-29T10:15:00+00:00"}
+{"source_system": "shop", "order_id": "000003", "source_version": 4, "operation": "upsert", "status": "paid", "amount": "60.00", "updated_at": "2026-09-29T10:15:00+00:00", "available_at": "2026-09-29T10:15:00+00:00"}
+{"source_system": "shop", "order_id": "000007", "source_version": 1, "operation": "upsert", "status": "new", "amount": "10.00", "updated_at": "2026-09-29T10:15:00+00:00", "available_at": "2026-09-29T10:15:00+00:00"}

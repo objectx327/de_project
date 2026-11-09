@@ -1,0 +1,17 @@
+{
+  "dataset": "orders",
+  "batch_id": "delta_2",
+  "mode": "delta",
+  "scope": [
+    "shop",
+    "pos"
+  ],
+  "complete": true,
+  "data_file": "orders.jsonl",
+  "record_count": 4,
+  "sha256": "a98de29b4d9252ff9e374e05d886c6e3d150ff144decb2994179e0ad816693f8",
+  "as_of": "2026-09-29T10:00:00+00:00",
+  "role": "additional_source_changes",
+  "selection_required": true,
+  "note": "Это дополнительные строки источника, а не результат отбора (09:00; 10:00]. Для извлечения объедините raw/delta_1 и raw/delta_2 и примените границы задания."
+}

@@ -1,0 +1,16 @@
+{
+  "dataset": "orders",
+  "batch_id": "full_0800",
+  "mode": "full",
+  "scope": [
+    "shop",
+    "pos"
+  ],
+  "complete": true,
+  "data_file": "orders.jsonl",
+  "record_count": 4,
+  "sha256": "ed9426a13d137f83edaa20d82ebb862ed9794108dd9e3102f32de5e1afbef963",
+  "snapshot_at": "2026-09-29T08:00:00+00:00",
+  "upper_bound": "2026-09-29T08:00:00+00:00",
+  "as_of": "2026-09-29T08:00:00+00:00"
+}
