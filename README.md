@@ -4692,3 +4692,1900 @@ having count(*)>1
 По завершению всех проверок новая watermark и статус SUCCESS должны фиксироваться одной транзакцией. Если публикация завершилась с ошибкой, то транзакция доллжна быть отмененя, статус FAILED записан отдельно после отката.
 
 Пример восстановления после сбоя - задание 5Б. Во время применения delta_1 загрузчик меняет первую запись orders_current, после чего намеренно возникает исключение. Поскольку изменение выполнялось внутри транзакции, постгре откатывает его, целевая таблица остается в исходном состоянии, watermark не продвигается, логи неуспешного запуска сохраняются вместе с причиной ошибки. После устранения причины сбоя запускается новая попытка - данные проходят повторную проверку и публикацию.
+
+# Неделя 7 - Data Quality и Airflow
+## Назначение 
+DAG marketline_payments автоматизирует загрузку ежедневных полных снимков платежей MarketLine из файлов payments.csv и manifest.json в PostgreSQL. Цель процесса - опубликовать агрегированную витрину выручки только после успешных проверок качества. Каждая строка de7_core.payments_daily соответствует отчетной дате, валюте и каналу и содержит количество и сумму успешных платежей. Платежи со статусом failed проходят контроль качества, но не входят в выручку. Суммы EUR и USD не складываются между собой
+
+## Архитектура и зависимости
+Обработка разделена на семь задач Airflow:
+
+receive_files -> stage_payments -> prepare_payments -> (check_rows, check_totals) -> quality_gate -> publish_payments
+
+check_rows и check_totals имеют общего предшественника и могут выполняться параллельно. quality_gate ожидает результаты обеих групп проверок. При критическом нарушении публикация блокируется.
+
+Исходные записи, преобразованные данные, отклонения, результаты проверок и опубликованная витрина хранятся отдельно. Для разделения запусков используется load_id, версия источника определяется по manifest.snapshot_id.
+
+Между задачами через XCom передаются только небольшие результаты и идентификаторы сохранённых данных.
+
+## Расписание и параметры запуска
+Используется CronDataIntervalTimetable с ежедневным расписанием 0 0 * * * и часовым поясом Europe/Berlin.
+
+Параметры DAG: start_date=2026-10-24, catchup=False, max_active_runs=1, max_active_tasks=4.
+
+Для ручного запуска передаются report_date и source_dir. Для планового запуска период определяется по data_interval_start и data_interval_end, а не по фактическому времени запуска задачи.
+
+Период включает начало суток и исключает конец. На 25 октября 2026 года приходится переход на зимнее время, поэтому календарные сутки длятся 25 часов.
+
+## Подготовка
+```
+week_07/sql/setup.sql
+week_07/sql/checks.sql
+```
+
+## Версии окружения
+Python 3.14.4
+Airflow 3.3.2
+psycopg 3.3.5
+
+***
+***
+
+## Перечень проверок 
+### Ошибки записи
+| Объект проверки | Этап | Условие прохождения | Критичность | Действие при нарушении |
+|---|---|---|---|---|
+| Обязательные поля | Подготовка | `source_system`, `payment_id`, `order_id`, `paid_at`, `amount`, `currency`, `status` заполнены. Пустая строка и строка из пробелов не считаются заполненными | Критическая | Сохранить исходную строку и причины; блокировать публикацию |
+| `source_system` | Подготовка | Значение совпадает с `source_system` из корректного manifest | Критическая | Сохранить строку и причину; блокировать публикацию |
+| Формат `paid_at` | Подготовка | Значение преобразуется во временную метку с часовым поясом | Критическая | Сохранить строку; проверку принадлежности периоду для неё отметить как невыполненную; блокировать публикацию |
+| Принадлежность `paid_at` периоду | Проверки записей | `period_start <= paid_at < period_end`, с учётом часовых поясов | Критическая | Сохранить строку как выходящую за период; блокировать публикацию, а не молча отфильтровать её |
+| `amount` | Подготовка | Конечное десятичное число, строго больше нуля, не более двух знаков после точки | Критическая | Сохранить строку и причину; блокировать публикацию |
+| `currency` | Подготовка | Значение — `EUR` или `USD` | Критическая | Сохранить строку и причину; блокировать публикацию |
+| `status` | Подготовка | Значение — `succeeded` или `failed` | Критическая | Сохранить строку и причину; блокировать публикацию |
+| Заполненный `channel_id` | Проверки записей | Код существует в справочнике каналов | Критическая | Сохранить строку; блокировать публикацию. Не заменять неизвестный непустой код на `unknown` |
+
+### Ошибки набора
+| Объект проверки | Этап | Условие прохождения | Критичность | Действие при нарушении |
+|---|---|---|---|---|
+| Синтаксис и структура manifest | Получение | Файл читается как JSON-объект; обязательные поля присутствуют и имеют подходящие типы: даты с часовым поясом, логическое `complete`, неотрицательное целое `row_count`, объект сумм с корректно читаемыми значениями | Критическая | Зафиксировать ошибку manifest; блокировать публикацию. Не подставлять пустой manifest или нулевые контроли |
+| Структура CSV | Получение / staging | CSV соответствует объявленному формату, содержит необходимые столбцы и может быть полностью разобран | Критическая | Сохранить диагностику; блокировать публикацию. Ошибку разбора не считать пустой поставкой |
+| Границы периода в manifest | Проверки набора | `period_start` и `period_end` соответствуют выбранным календарным суткам `Europe/Berlin` | Критическая | Блокировать публикацию |
+| Подтверждение полноты | Проверки набора | `complete` равен именно логическому `true` | Критическая | Блокировать публикацию |
+| Покрытие периода источником | Проверки набора | `covered_until >= period_end` | Критическая | Блокировать публикацию |
+| Уникальность ключа | Проверки набора | Каждая пара `(source_system, payment_id)` встречается внутри поставки не более одного раза | Критическая | Сохранить строки повторяющихся ключей; блокировать публикацию. Не удалять дубликаты ради прохождения проверки |
+| Количество строк | Проверки набора | Число всех прочитанных записей равно `manifest.row_count` | Критическая | Сохранить фактическое и ожидаемое значения; блокировать публикацию |
+| Контрольные суммы | Проверки набора | Полные суммы `amount` для `status = succeeded`, отдельно по валютам, совпадают с `succeeded_amount_by_currency` | Критическая | Сохранить фактические и ожидаемые значения; блокировать публикацию при несовпадении или невозможности достоверной сверки |
+| Доля отсутствующих каналов | Проверки набора | Доля равна нулю — норма; больше нуля и не выше 2% — допустимое предупреждение; выше 2% — нарушение | WARN либо критическая | При WARN сохранить предупреждение и использовать категорию `unknown`; при превышении порога сохранить связанные строки и блокировать публикацию |
+| Допустимость пустой поставки | Проверки набора | Прочитано 0 записей, полнота и покрытие подтверждены, период корректен, `row_count = 0`, объект контрольных сумм пуст | Критическая при невыполнении условий | Неподтверждённую пустую поставку блокировать. Подтверждённую разрешить к публикации |
+| Наличие обязательных результатов | Перед публикацией | Все обязательные проверки имеют результат для текущей поставки; нет критических нарушений и невыполненных обязательных проверок | Критическая | Блокировать публикацию |
+
+### Технические ошибки
+| Объект / ситуация | Этап | Условие успешного выполнения | Критичность | Действие при нарушении |
+|---|---|---|---|---|
+| Доступ к исходным файлам и справочнику | Получение | Файлы доступны для чтения | Блокирующая техническая ошибка | Зафиксировать сбой; не публиковать; временный сбой допускает повтор |
+| Соединение с PostgreSQL и запись staging | Staging | Соединение доступно, запись завершена | Блокирующая техническая ошибка | Откатить незавершённую транзакцию; зафиксировать сбой |
+| Выполнение проверок и сохранение их результатов | Проверки | Проверки выполнены, результаты и необходимые отклонения сохранены | Блокирующая техническая ошибка | Не разрешать публикацию без обязательных результатов |
+| Замена данных витрины | Публикация | Все операции публикации успешно завершены в одной транзакции | Блокирующая техническая ошибка | Откатить изменения, сохранив прежний результат даты |
+
+
+**Какие результаты можно вычислить, если часть значений не удалось преобразовать:**
+| Результат | Можно ли получить при ошибках преобразования |
+|---|---|
+| Количество прочитанных записей | Да, если CSV полностью прочитан. Ошибки в `amount` или `paid_at` не мешают считать записи |
+| Количество пустых обязательных полей | Да, по исходным строковым значениям |
+| Проверки допустимых `currency` и `status` | Да, они не зависят от преобразования суммы и времени |
+| Повторы ключа | Да, для записей, у которых обе части ключа доступны. Отсутствующий ключ дополнительно является самостоятельной ошибкой |
+| Число и доля отсутствующих каналов | Да, если файл полностью прочитан и поле канала доступно для проверки |
+| Соответствие заполненных каналов справочнику | Да, если справочник доступен |
+| Принадлежность платежей периоду | Только для строк с успешно преобразованным `paid_at` |
+| Суммы `succeeded` по валютам | Зависит от того, какие именно поля повреждены |
+| Сверка с manifest | Только если соответствующие контрольные значения manifest корректно прочитаны |
+
+## Реализация загрузчика
+
+При первом запуске DAG задача receive_files завершилась ошибкой подключения к PostgreSQL. После настройки Host в Airflow Connection сетевое соединение стало доступным, однако PostgreSQL отклонил подключение из WSL по правилам pg_hba.conf. Для пользователя de_student был настроен доступ к базе de_course с IP Ubuntu. История неуспешных запусков сохранена в Airflow.
+
+## Базовые загрузки
+### 2026-10-24
+Конфигурация запуска:
+```json
+{
+  "report_date": "2026-10-24",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-24"
+}
+```
+### 2026-10-25
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-25"
+}
+```
+### 2026-10-26
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26"
+}
+```
+
+### Проверки
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum
+FROM de7_core.payments_daily
+ORDER BY report_date, currency, channel_id;
+```
+|report_date|currency|channel_id|payment_count|amount_sum|
+|-----------|--------|----------|-------------|----------|
+|2026-10-24|EUR|app|37|3404.55|
+|2026-10-24|EUR|partner|36|3343.86|
+|2026-10-24|USD|web|36|3294.54|
+|2026-10-25|EUR|app|37|3404.55|
+|2026-10-25|EUR|partner|36|3343.86|
+|2026-10-25|USD|web|36|3294.54|
+|2026-10-26|EUR|app|37|3404.55|
+|2026-10-26|EUR|partner|36|3343.86|
+|2026-10-26|USD|web|36|3294.54|
+
+```sql
+SELECT
+    load_id,
+    run_id,
+    report_date,
+    source_version,
+    state,
+    read_rows,
+    accepted_rows,
+    rejected_rows,
+    prepared_rows,
+    last_error
+FROM de7_etl.load_runs
+ORDER BY created_at DESC
+LIMIT 20;
+```
+|load_id|run_id|report_date|source_version|state|read_rows|accepted_rows|rejected_rows|prepared_rows|last_error|
+|-------|------|-----------|--------------|-----|---------|-------------|-------------|-------------|----------|
+|090b0a59-8f3d-4c70-ae18-33c32c374509|manual__2026-11-14T20:10:06.253370+00:00|2026-10-26|daily_2026-10-26|published|120|120|0|120||
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|manual__2026-11-14T20:09:10.893826+00:00|2026-10-25|daily_2026-10-25|published|120|120|0|120||
+|358653be-520b-4d84-b100-688cfe3f8e09|manual__2026-11-14T19:20:08.151215+00:00|2026-10-24|daily_2026-10-24|published|120|120|0|120||
+
+![alt text](7_01.png)
+
+#### Проверка баланса записей
+```sql
+SELECT
+    l.load_id,
+    l.read_rows,
+    l.accepted_rows,
+    l.rejected_rows,
+    l.prepared_rows,
+    l.read_rows = l.accepted_rows + l.rejected_rows AS balance_ok
+FROM de7_etl.load_runs l
+```
+|load_id|read_rows|accepted_rows|rejected_rows|prepared_rows|balance_ok|
+|-------|---------|-------------|-------------|-------------|----------|
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|120|120|0|120|true|
+|358653be-520b-4d84-b100-688cfe3f8e09|120|120|0|120|true|
+|090b0a59-8f3d-4c70-ae18-33c32c374509|120|120|0|120|true|
+
+#### Проверка баланса записей на примере последнего запуска:
+```sql
+WITH p AS (SELECT '090b0a59-8f3d-4c70-ae18-33c32c374509'::uuid AS load_id),
+counts AS (
+    SELECT
+        (SELECT count(*) FROM de7_stg.payments_raw r WHERE r.load_id=p.load_id) AS raw_count,
+        (SELECT count(*) FROM de7_stg.payments_typed t WHERE t.load_id=p.load_id) AS typed_count,
+        (SELECT count(*) FROM de7_stg.rejections r WHERE r.load_id=p.load_id) AS rejected_count,
+        (SELECT count(*) FROM de7_stg.accepted a WHERE a.load_id=p.load_id) AS accepted_count,
+        (SELECT count(*) FROM de7_stg.payments_prepared x WHERE x.load_id=p.load_id) AS prepared_count
+    FROM p
+)
+SELECT *, raw_count = accepted_count + rejected_count AS balance_ok,
+          accepted_count = prepared_count AS prepared_count_ok
+FROM counts;
+```
+|raw_count|typed_count|rejected_count|accepted_count|prepared_count|balance_ok|prepared_count_ok|
+|---------|-----------|--------------|--------------|--------------|----------|-----------------|
+|120|120|0|120|120|true|true|
+
+
+#### DQ
+```sql
+SELECT
+    load_id,
+	task_id,
+    attempt,
+    status,
+    COUNT(*) AS rules
+FROM de7_etl.dq_results
+--WHERE load_id = '090b0a59-8f3d-4c70-ae18-33c32c374509'::uuid
+GROUP BY load_id, task_id, attempt, status
+ORDER BY load_id, task_id, attempt, status;
+```
+|load_id|task_id|attempt|status|rules|
+|-------|-------|-------|------|-----|
+|090b0a59-8f3d-4c70-ae18-33c32c374509|check_rows|1|PASS|12|
+|090b0a59-8f3d-4c70-ae18-33c32c374509|check_totals|1|PASS|16|
+|358653be-520b-4d84-b100-688cfe3f8e09|check_rows|1|PASS|12|
+|358653be-520b-4d84-b100-688cfe3f8e09|check_totals|1|PASS|16|
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|check_rows|1|PASS|12|
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|check_totals|1|PASS|16|
+
+
+### Повтор 25 октября
+Текущее состояние:
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum,
+    load_id,
+    source_version
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+ORDER BY currency, channel_id;
+SELECT DISTINCT load_id, source_version
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25';
+```
+
+|report_date|currency|channel_id|payment_count|amount_sum|load_id|source_version|
+|-----------|--------|----------|-------------|----------|-------|--------------|
+|2026-10-25|EUR|app|37|3404.55|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|daily_2026-10-25|
+|2026-10-25|EUR|partner|36|3343.86|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|daily_2026-10-25|
+|2026-10-25|USD|web|36|3294.54|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|daily_2026-10-25|
+
+|load_id|source_version|
+|-------|--------------|
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|daily_2026-10-25|
+
+
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-25"
+}
+```
+Состояние после запуска:
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum,
+    load_id,
+    source_version
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+ORDER BY currency, channel_id;
+SELECT DISTINCT load_id, source_version
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25';
+```
+|report_date|currency|channel_id|payment_count|amount_sum|load_id|source_version|
+|-----------|--------|----------|-------------|----------|-------|--------------|
+|2026-10-25|EUR|app|37|3404.55|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|
+|2026-10-25|EUR|partner|36|3343.86|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|
+|2026-10-25|USD|web|36|3294.54|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|
+
+|load_id|source_version|
+|-------|--------------|
+|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|
+
+Сравнение с предыдущими данными в интеграционной таблице:
+```sql
+WITH old_result AS (
+    SELECT report_date, currency, channel_id,
+           payment_count, amount_sum
+    FROM de7_stg.i_payments_daily
+    WHERE load_id = '5ff6697d-4f6c-48e9-874d-d15a77eb08d7'::uuid
+),
+new_result AS (
+    SELECT report_date, currency, channel_id,
+           payment_count, amount_sum
+    FROM de7_core.payments_daily
+    WHERE report_date = DATE '2026-10-25'
+),
+differences AS (
+    (SELECT * FROM old_result
+     EXCEPT ALL
+     SELECT * FROM new_result)
+
+    UNION ALL
+
+    (SELECT * FROM new_result
+     EXCEPT ALL
+     SELECT * FROM old_result)
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+
+## Отрицательные сценарии Data Quality
+Проверки проводятся на дату 25.10.2026. 
+Текущее состояние:
+```sql
+SELECT *
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+ORDER BY currency, channel_id;
+```
+|report_date|currency|channel_id|payment_count|amount_sum|load_id|source_version|run_id|period_start|period_end|published_at|
+|-----------|--------|----------|-------------|----------|-------|--------------|------|------------|----------|------------|
+|2026-10-25|EUR|app|37|3404.55|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.716 +0100|
+|2026-10-25|EUR|partner|36|3343.86|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.717 +0100|
+|2026-10-25|USD|web|36|3294.54|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.717 +0100|
+
+
+### channel_limit
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/channel_limit"
+}
+```
+![alt text](7_02.png)
+
+```sql
+SELECT rule_name, status, expected, actual
+FROM de7_etl.dq_results
+WHERE load_id = 'ae4e9c6f-b9b0-4f36-a787-b086445fc98d'::uuid
+  AND rule_name = 'missing_channel_share';
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|missing_channel_share|FAIL|{"max_share": 0.02}|{"share": 0.02500000000000000000, "missing": 3, "read_rows": 120}|
+
+
+### invalid_records
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/invalid_records"
+}
+```
+![alt text](7_03.png)
+
+```sql
+SELECT
+    row_no,
+    file_line_no,
+    CARDINALITY(reasons) AS reason_count,
+    reasons
+FROM de7_stg.rejections
+WHERE load_id = '92b08892-a48c-452a-abb7-a0f42275cbd1'::uuid
+ORDER BY row_no;
+```
+|row_no|file_line_no|reason_count|reasons|
+|------|------------|------------|-------|
+|2|3|1|{"required_fields: Не заполнены: payment_id"}|
+|3|4|1|{"amount_valid: Конечное число > 0; максимум 2 знака после точки"}|
+|4|5|1|{"status_allowed: Разрешены succeeded и failed"}|
+|5|6|1|{"currency_allowed: Разрешены EUR и USD"}|
+|6|7|1|{"channel_known: Пустой канал допустим на уровне записи; долю проверяем отдельно"}|
+|7|8|1|{"paid_at_parse: paid_at: некорректная дата"}|
+|8|9|1|{"paid_at_in_period: Период: [period_start, period_end); paid_at с часовым поясом"}|
+|9|10|1|{"payment_key_unique: Число записей с ключом: 2"}|
+|121|122|1|{"payment_key_unique: Число записей с ключом: 2"}|
+
+```sql
+SELECT
+    read_rows,
+    accepted_rows,
+    rejected_rows,
+    read_rows = accepted_rows + rejected_rows AS balance_ok
+FROM de7_etl.load_runs
+WHERE load_id = '92b08892-a48c-452a-abb7-a0f42275cbd1'::uuid;
+```
+|read_rows|accepted_rows|rejected_rows|balance_ok|
+|---------|-------------|-------------|----------|
+|121|112|9|true|
+
+
+### incomplete
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/incomplete"
+}
+```
+![alt text](7_04.png)
+
+```sql
+SELECT complete, covered_until, period_end, state
+FROM de7_etl.load_runs
+WHERE load_id = '4609ecbb-14f5-4a10-b355-ec60abe99f34'::uuid;
+```
+|complete|covered_until|period_end|state|
+|--------|-------------|----------|-----|
+|false|2026-10-26 00:00:00.000 +0100|2026-10-26 00:00:00.000 +0100|blocked|
+
+
+```sql
+SELECT rule_name, status, expected, actual
+FROM de7_etl.dq_results
+WHERE load_id = '4609ecbb-14f5-4a10-b355-ec60abe99f34'::uuid
+  AND rule_name = 'source_coverage';
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|source_coverage|FAIL|{"complete": true, "covered_until_min": "2026-10-25T23:00:00+00:00"}|{"complete": false, "covered_until": "2026-10-25T23:00:00+00:00"}|
+
+
+### unconfirmed_empty
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/unconfirmed_empty"
+}
+```
+![alt text](7_05.png)
+
+```sql
+SELECT
+    l.read_rows,
+    l.expected_row_count,
+    l.complete,
+    l.state,
+    COUNT(r.row_no) AS actual_raw_rows
+FROM de7_etl.load_runs l
+LEFT JOIN de7_stg.payments_raw r ON r.load_id = l.load_id
+WHERE l.load_id = '65ecbadd-43ac-47ad-87f9-a6ed7dcd4419'::uuid
+GROUP BY l.load_id;
+```
+|read_rows|expected_row_count|complete|state|actual_raw_rows|
+|---------|------------------|--------|-----|---------------|
+|0|120|false|blocked|0|
+
+
+```sql
+SELECT rule_name, status, expected, actual
+FROM de7_etl.dq_results
+WHERE load_id = '65ecbadd-43ac-47ad-87f9-a6ed7dcd4419'::uuid
+  AND rule_name IN (
+      'empty_input_confirmed',
+      'source_coverage'
+  );
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|empty_input_confirmed|FAIL|{"empty_requires": "complete=true, coverage, matching period, row_count=0, sums={}"}|{"sums": {"EUR": "6748.41", "USD": "3294.54"}, "complete": false, "read_rows": 0, "row_count": 120, "covered_until": "2026-10-25T23:00:00+00:00"}|
+|source_coverage|FAIL|{"complete": true, "covered_until_min": "2026-10-25T23:00:00+00:00"}|{"complete": false, "covered_until": "2026-10-25T23:00:00+00:00"}|
+
+
+### stale - источник не покрыл конец периода
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/stale"
+}
+```
+![alt text](7_06.png)
+```sql
+SELECT
+    report_date,
+    complete,
+    covered_until,
+    period_end,
+    covered_until >= period_end AS coverage_ok
+FROM de7_etl.load_runs
+WHERE load_id = '630f7f65-3e2e-4316-8382-b80d67795be6'::uuid;
+```
+|report_date|complete|covered_until|period_end|coverage_ok|
+|-----------|--------|-------------|----------|-----------|
+|2026-10-25|true|2026-10-25 22:00:00.000 +0100|2026-10-26 00:00:00.000 +0100|false|
+
+```sql
+SELECT rule_name, status, expected, actual
+FROM de7_etl.dq_results
+WHERE load_id = '630f7f65-3e2e-4316-8382-b80d67795be6'::uuid
+  AND rule_name = 'source_coverage';
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|source_coverage|FAIL|{"complete": true, "covered_until_min": "2026-10-25T23:00:00+00:00"}|{"complete": true, "covered_until": "2026-10-25T21:00:00+00:00"}|
+
+
+### control_mismatch — не совпадает контрольная сумма
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/control_mismatch"
+}
+```
+![alt text](7_07.png)
+```sql
+SELECT
+    l.read_rows,
+    COUNT(r.row_no) AS staged_rows
+FROM de7_etl.load_runs l
+LEFT JOIN de7_stg.payments_raw r ON r.load_id = l.load_id
+WHERE l.load_id = '54247d67-b7ca-4d6b-a5e0-4880a6898ec2'::uuid
+GROUP BY l.load_id;
+```
+|read_rows|staged_rows|
+|---------|-----------|
+|120|120|
+
+```sql
+SELECT
+    rule_name,
+    status,
+    expected,
+    actual
+FROM de7_etl.dq_results
+WHERE load_id = '54247d67-b7ca-4d6b-a5e0-4880a6898ec2'::uuid
+  AND rule_name = 'manifest_success_sums';
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|manifest_success_sums|FAIL|{"EUR": 1.00, "USD": 1.00}|{"EUR": 6748.41, "USD": 3294.54}|
+
+```sql
+SELECT load_id, state, last_error, published_at
+FROM de7_etl.load_runs
+WHERE load_id = '54247d67-b7ca-4d6b-a5e0-4880a6898ec2'::uuid;
+```
+|load_id|state|last_error|published_at|
+|-------|-----|----------|------------|
+|54247d67-b7ca-4d6b-a5e0-4880a6898ec2|blocked|manifest_success_sums: FAIL||
+
+
+### broken_manifest — повреждённый JSON
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/broken_manifest"
+}
+```
+![alt text](7_08.png)
+
+```sql
+SELECT
+    load_id,
+    state,
+    manifest_errors,
+    last_error
+FROM de7_etl.load_runs
+WHERE load_id = '92973d71-05ac-4d21-a7a5-032baee11966'::uuid;
+```
+|load_id|state|manifest_errors|last_error|
+|-------|-----|---------------|----------|
+|92973d71-05ac-4d21-a7a5-032baee11966|failed|{"manifest: некорректный JSON (Expecting property name enclosed in double quotes)"}|Некорректный manifest|
+
+
+```sql
+SELECT rule_name, status, actual, detail
+FROM de7_etl.dq_results
+WHERE load_id = '92973d71-05ac-4d21-a7a5-032baee11966'::uuid;
+```
+|rule_name|status|actual|detail|
+|---------|------|------|------|
+|manifest_structure|ERROR|["manifest: некорректный JSON (Expecting property name enclosed in double quotes)"]|Manifest не прошёл проверку|
+
+
+```sql
+SELECT COUNT(*) AS raw_rows
+FROM de7_stg.payments_raw
+WHERE load_id = '92973d71-05ac-4d21-a7a5-032baee11966'::uuid;
+```
+|raw_rows|
+|--------|
+|0|
+
+
+### Состояние после проверок 
+```sql
+SELECT *
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+ORDER BY currency, channel_id;
+```
+|report_date|currency|channel_id|payment_count|amount_sum|load_id|source_version|run_id|period_start|period_end|published_at|
+|-----------|--------|----------|-------------|----------|-------|--------------|------|------------|----------|------------|
+|2026-10-25|EUR|app|37|3404.55|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.716 +0100|
+|2026-10-25|EUR|partner|36|3343.86|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.717 +0100|
+|2026-10-25|USD|web|36|3294.54|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|daily_2026-10-25|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 22:11:41.717 +0100|
+
+
+## Предупреждение, исправленная версия и пустая поставка
+### warning — допустимое отсутствие канала
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/warning"
+}
+```
+![alt text](7_09.png)
+
+```sql
+SELECT rule_name, status, expected, actual
+FROM de7_etl.dq_results
+WHERE load_id = '415830db-e9b9-4d30-8275-4acbe892bd62'::uuid
+  AND rule_name = 'missing_channel_share';
+```
+|rule_name|status|expected|actual|
+|---------|------|--------|------|
+|missing_channel_share|WARN|{"max_share": 0.02}|{"share": 0.01666666666666666667, "missing": 2, "read_rows": 120}|
+
+```sql
+SELECT
+    row_no,
+    payment_id,
+    currency,
+    status,
+    channel_id
+FROM de7_stg.payments_prepared
+WHERE load_id = '415830db-e9b9-4d30-8275-4acbe892bd62'::uuid
+  AND channel_id = 'unknown';
+```
+|row_no|payment_id|currency|status|channel_id|
+|------|----------|--------|------|----------|
+|2|202610250002|EUR|succeeded|unknown|
+|3|202610250003|EUR|succeeded|unknown|
+
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+  AND channel_id = 'unknown';
+```
+|report_date|currency|channel_id|payment_count|amount_sum|
+|-----------|--------|----------|-------------|----------|
+|2026-10-25|EUR|unknown|2|24.11|
+
+```sql
+SELECT
+    load_id,
+    state,
+    published_at
+FROM de7_etl.load_runs
+WHERE load_id = '415830db-e9b9-4d30-8275-4acbe892bd62'::uuid;
+```
+|load_id|state|published_at|
+|-------|-----|------------|
+|415830db-e9b9-4d30-8275-4acbe892bd62|published|2026-11-14 23:12:50.030 +0100|
+
+### Восстановление daily за 25 октября
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-25"
+}
+```
+```sql
+SELECT *
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25'
+ORDER BY currency, channel_id;
+```
+|report_date|currency|channel_id|payment_count|amount_sum|load_id|source_version|run_id|period_start|period_end|published_at|
+|-----------|--------|----------|-------------|----------|-------|--------------|------|------------|----------|------------|
+|2026-10-25|EUR|app|37|3404.55|3453eeec-8df0-4c63-9be2-b67a0f361e9d|daily_2026-10-25|manual__2026-11-14T22:50:27.341814+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 23:50:34.894 +0100|
+|2026-10-25|EUR|partner|36|3343.86|3453eeec-8df0-4c63-9be2-b67a0f361e9d|daily_2026-10-25|manual__2026-11-14T22:50:27.341814+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 23:50:34.894 +0100|
+|2026-10-25|USD|web|36|3294.54|3453eeec-8df0-4c63-9be2-b67a0f361e9d|daily_2026-10-25|manual__2026-11-14T22:50:27.341814+00:00|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|2026-11-14 23:50:34.894 +0100|
+
+
+### corrected
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/corrected"
+}
+```
+![alt text](7_10.png)
+```sql
+SELECT report_date, currency, channel_id,
+       payment_count, amount_sum,
+       source_version, load_id
+FROM de7_core.payments_daily
+ORDER BY report_date, currency, channel_id;
+```
+|report_date|currency|channel_id|payment_count|amount_sum|source_version|load_id|
+|-----------|--------|----------|-------------|----------|--------------|-------|
+|2026-10-24|EUR|app|37|3404.55|daily_2026-10-24|358653be-520b-4d84-b100-688cfe3f8e09|
+|2026-10-24|EUR|partner|36|3343.86|daily_2026-10-24|358653be-520b-4d84-b100-688cfe3f8e09|
+|2026-10-24|USD|web|36|3294.54|daily_2026-10-24|358653be-520b-4d84-b100-688cfe3f8e09|
+|2026-10-25|EUR|app|37|4393.17|scenarios_corrected|58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1|
+|2026-10-25|EUR|partner|36|3343.86|scenarios_corrected|58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1|
+|2026-10-25|USD|web|36|3294.54|scenarios_corrected|58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1|
+|2026-10-26|EUR|app|37|3404.55|daily_2026-10-26|090b0a59-8f3d-4c70-ae18-33c32c374509|
+|2026-10-26|EUR|partner|36|3343.86|daily_2026-10-26|090b0a59-8f3d-4c70-ae18-33c32c374509|
+|2026-10-26|USD|web|36|3294.54|daily_2026-10-26|090b0a59-8f3d-4c70-ae18-33c32c374509|
+
+Поввтор
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/scenarios/corrected"
+}
+```
+```sql
+WITH differences AS (
+    (
+        SELECT report_date, currency, channel_id,
+               payment_count, amount_sum
+        FROM de7_stg.i_payments_daily
+        WHERE load_id = '58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1'::uuid
+        EXCEPT ALL
+        SELECT report_date, currency, channel_id,
+               payment_count, amount_sum
+        FROM de7_core.payments_daily
+        WHERE report_date = DATE '2026-10-25'
+    )
+    UNION ALL
+    (
+        SELECT report_date, currency, channel_id,
+               payment_count, amount_sum
+        FROM de7_core.payments_daily
+        WHERE report_date = DATE '2026-10-25'
+        EXCEPT ALL
+        SELECT report_date, currency, channel_id,
+               payment_count, amount_sum
+        FROM de7_stg.i_payments_daily
+        WHERE load_id = '58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1'::uuid
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+```sql
+SELECT load_id, run_id, source_version, state
+FROM de7_etl.load_runs
+WHERE load_id IN (
+    '58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1'::uuid,
+    'ab1f2698-04d5-4983-9a51-728640239091'::uuid
+)
+ORDER BY created_at;
+```
+|load_id|run_id|source_version|state|
+|-------|------|--------------|-----|
+|58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1|manual__2026-11-14T22:52:27.302803+00:00|scenarios_corrected|published|
+|ab1f2698-04d5-4983-9a51-728640239091|manual__2026-11-14T23:23:31.503628+00:00|scenarios_corrected|published|
+
+
+### Подтвержденная пустота за 27 октября
+```sql
+CREATE TABLE de7_etl.qa_before_c4 AS
+SELECT *
+FROM de7_core.payments_daily
+WHERE report_date <> DATE '2026-10-27';
+
+SELECT COUNT(*)
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-27';
+```
+|count|
+|-----|
+|0|
+
+Вставим одну тестовую строку на основе существующей строки за 24 октября
+```sql
+INSERT INTO de7_core.payments_daily (
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum,
+    load_id,
+    source_version,
+    run_id,
+    period_start,
+    period_end
+)
+SELECT
+    DATE '2026-10-27',
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum,
+    load_id,
+    source_version,
+    run_id,
+    period_start,
+    period_end
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-24'
+ORDER BY currency, channel_id
+LIMIT 1;
+
+SELECT report_date, currency, channel_id,
+       payment_count, amount_sum
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-27';
+```
+|report_date|currency|channel_id|payment_count|amount_sum|
+|-----------|--------|----------|-------------|----------|
+|2026-10-27|EUR|app|37|3404.55|
+
+```json
+{
+  "report_date": "2026-10-27",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-27"
+}
+```
+```sql
+SELECT
+    load_id,
+    state,
+    read_complete,
+    read_rows,
+    expected_row_count,
+    expected_sums,
+    complete,
+    covered_until >= period_end AS coverage_ok,
+    published_at
+FROM de7_etl.load_runs
+WHERE load_id = '540da43d-3c5f-4d6b-a530-16c727d16812'::uuid;
+```
+|load_id|state|read_complete|read_rows|expected_row_count|expected_sums|complete|coverage_ok|published_at|
+|-------|-----|-------------|---------|------------------|-------------|--------|-----------|------------|
+|540da43d-3c5f-4d6b-a530-16c727d16812|published|true|0|0|{}|true|true|2026-11-15 00:30:15.375 +0100|
+
+```sql
+SELECT COUNT(*) AS rows_27
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-27';
+```
+|rows_27|
+|-----|
+|0|
+
+```sql
+WITH differences AS (
+    (
+        SELECT *
+        FROM de7_etl.qa_before_c4
+        EXCEPT ALL
+        SELECT *
+        FROM de7_core.payments_daily
+        WHERE report_date <> DATE '2026-10-27'
+    )
+    UNION ALL
+    (
+        SELECT *
+        FROM de7_core.payments_daily
+        WHERE report_date <> DATE '2026-10-27'
+        EXCEPT ALL
+        SELECT *
+        FROM de7_etl.qa_before_c4
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+
+## Тестирование Airflow и восстановления
+### Параллельность SQL-проверок
+![alt text](7_11.png)
+
+## Повторы после временной недоступности
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26",
+  "test_failure": "file_once"
+}
+```
+![alt text](7_12.png)
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26",
+  "test_failure": "file_always"
+}
+```
+![alt text](7_13.png)
+
+### Сбой после фиксации staging
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26",
+  "test_failure": "after_staging_once"
+}
+```
+![alt text](7_14.png)
+```sql
+SELECT
+    attempt,
+    event_status,
+    counters,
+    reason,
+    event_at
+FROM de7_etl.load_events
+WHERE load_id = '775d26bb-747a-43f2-8f10-93155e09281d'::uuid
+  AND task_id = 'stage_payments'
+ORDER BY event_at;
+```
+|attempt|event_status|counters|reason|event_at|
+|-------|------------|--------|------|--------|
+|1|FAILED|{"staged_rows": 120}|Тестовый сбой после COMMIT staging|2026-11-15 00:40:17.021 +0100|
+|2|SUCCESS|{"staged_rows": 120}||2026-11-15 00:40:48.590 +0100|
+
+```sql
+SELECT
+    l.load_id,
+    l.read_rows,
+    l.expected_row_count,
+    COUNT(r.row_no) AS actual_raw_rows,
+    COUNT(DISTINCT r.row_no) AS unique_row_numbers,
+    l.read_complete,
+    l.staging_hash IS NOT NULL AS hash_saved
+FROM de7_etl.load_runs l
+LEFT JOIN de7_stg.payments_raw r
+    ON r.load_id = l.load_id
+WHERE l.load_id = '775d26bb-747a-43f2-8f10-93155e09281d'::uuid
+GROUP BY l.load_id;
+```
+|load_id|read_rows|expected_row_count|actual_raw_rows|unique_row_numbers|read_complete|hash_saved|
+|-------|---------|------------------|---------------|------------------|-------------|----------|
+|775d26bb-747a-43f2-8f10-93155e09281d|120|120|120|120|true|true|
+
+```sql
+SELECT load_id, state, read_rows,
+       accepted_rows, rejected_rows, prepared_rows
+FROM de7_etl.load_runs
+WHERE load_id = '775d26bb-747a-43f2-8f10-93155e09281d'::uuid;
+```
+|load_id|state|read_rows|accepted_rows|rejected_rows|prepared_rows|
+|-------|-----|---------|-------------|-------------|-------------|
+|775d26bb-747a-43f2-8f10-93155e09281d|published|120|120|0|120|
+
+
+### Откат внутри публикации
+```sql
+CREATE TABLE de7_etl.qa_before_d4 AS
+SELECT *
+FROM de7_core.payments_daily;
+```
+
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26",
+  "test_failure": "inside_publication"
+}
+```
+![alt text](7_15.png)
+```sql
+WITH differences AS (
+    (
+        SELECT *
+        FROM de7_etl.qa_before_d4
+        EXCEPT ALL
+        SELECT *
+        FROM de7_core.payments_daily
+    )
+    UNION ALL
+    (
+        SELECT *
+        FROM de7_core.payments_daily
+        EXCEPT ALL
+        SELECT *
+        FROM de7_etl.qa_before_d4
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+```sql
+SELECT
+    attempt,
+    event_status,
+    reason,
+    event_at
+FROM de7_etl.load_events
+WHERE load_id = 'fb3092a8-3374-450e-90be-4e0a8ab20009'::uuid
+  AND task_id = 'publish_payments'
+ORDER BY event_at;
+```
+|attempt|event_status|reason|event_at|
+|-------|------------|------|--------|
+|1|FAILED|RuntimeError: откат публикации|2026-11-15 00:44:52.780 +0100|
+
+
+```sql
+SELECT
+    l.load_id,
+    l.state,
+    l.published_at,
+    a.approved_at
+FROM de7_etl.load_runs l
+LEFT JOIN de7_etl.publication_approvals a
+    ON a.load_id = l.load_id
+WHERE l.load_id = 'fb3092a8-3374-450e-90be-4e0a8ab20009'::uuid;
+```
+|load_id|state|published_at|approved_at|
+|-------|-----|------------|-----------|
+|fb3092a8-3374-450e-90be-4e0a8ab20009|checked||2026-11-15 00:44:51.658 +0100|
+
+Восстановление
+```json
+{
+  "report_date": "2026-10-26",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-26"
+}
+```
+
+### Отсутствие и подмена обязательного результата
+```sql
+CREATE TABLE de7_etl.qa_before_d5 AS
+SELECT *
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-10-25';
+```
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-25",
+  "test_failure": "missing_result"
+}
+```
+![alt text](7_16.png)
+```sql
+SELECT
+    load_id,
+    state,
+    last_error,
+    published_at
+FROM de7_etl.load_runs
+WHERE load_id = 'ae3b1b92-5672-4afb-a9fe-a3bacac5d6f0'::uuid;
+```
+|load_id|state|last_error|published_at|
+|-------|-----|----------|------------|
+|ae3b1b92-5672-4afb-a9fe-a3bacac5d6f0|blocked|Не хватает результатов обязательных проверок; Неполный или повторяющийся список правил||
+
+```sql
+SELECT COUNT(*) AS approval_count
+FROM de7_etl.publication_approvals
+WHERE load_id = 'ae3b1b92-5672-4afb-a9fe-a3bacac5d6f0'::uuid;
+```
+|approval_count|
+|--------------|
+|0|
+
+```json
+{
+  "report_date": "2026-10-25",
+  "source_dir": "/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-10-25",
+  "test_failure": "foreign_load_result"
+}
+```
+![alt text](7_17.png)
+
+```sql
+SELECT
+    load_id,
+    state,
+    last_error,
+    published_at
+FROM de7_etl.load_runs
+WHERE load_id = '927b14fd-1eae-427f-8b65-a8223bd0028f'::uuid;
+```
+|load_id|state|last_error|published_at|
+|-------|-----|----------|------------|
+|927b14fd-1eae-427f-8b65-a8223bd0028f|blocked|Результат 534 не относится к этой загрузке||
+
+```sql
+SELECT COUNT(*) AS approval_count
+FROM de7_etl.publication_approvals
+WHERE load_id = '927b14fd-1eae-427f-8b65-a8223bd0028f'::uuid;
+```
+|approval_count|
+|--------------|
+|0|
+
+
+```sql
+WITH differences AS (
+    (
+        SELECT *
+        FROM de7_etl.qa_before_d5
+        EXCEPT ALL
+        SELECT *
+        FROM de7_core.payments_daily
+        WHERE report_date = DATE '2026-10-25'
+    )
+    UNION ALL
+    (
+        SELECT *
+        FROM de7_core.payments_daily
+        WHERE report_date = DATE '2026-10-25'
+        EXCEPT ALL
+        SELECT *
+        FROM de7_etl.qa_before_d5
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+
+### Проверка календарных интервалов и перехода на зимнее время
+```sql
+SELECT DISTINCT
+    report_date,
+    period_start,
+    period_end,
+    EXTRACT(EPOCH FROM period_end - period_start) / 3600 AS hours
+FROM de7_etl.load_runs
+WHERE report_date = DATE '2026-10-25';
+```
+|report_date|period_start|period_end|hours|
+|-----------|------------|----------|-----|
+|2026-10-25|2026-10-25 00:00:00.000 +0200|2026-10-26 00:00:00.000 +0100|25.0000000000000000|
+
+
+```sql
+WITH events(payment_id,paid_at) AS (VALUES
+    ('B1','2026-10-24T23:59:59+02:00'::timestamptz),
+    ('B2','2026-10-25T00:00:00+02:00'::timestamptz),
+    ('B3','2026-10-25T02:30:00+02:00'::timestamptz),
+    ('B4','2026-10-25T02:30:00+01:00'::timestamptz),
+    ('B5','2026-10-25T23:59:59+01:00'::timestamptz),
+    ('B6','2026-10-26T00:00:00+01:00'::timestamptz)
+), bounds AS (
+    SELECT '2026-10-25T00:00:00+02:00'::timestamptz AS start_at,
+           '2026-10-26T00:00:00+01:00'::timestamptz AS end_at
+)
+SELECT payment_id, paid_at,
+       paid_at>=start_at AND paid_at<end_at AS included
+FROM events CROSS JOIN bounds
+ORDER BY payment_id;
+```
+|payment_id|paid_at|included|
+|----------|-------|--------|
+|B1|2026-10-24 23:59:59.000 +0200|false|
+|B2|2026-10-25 00:00:00.000 +0200|true|
+|B3|2026-10-25 02:30:00.000 +0200|true|
+|B4|2026-10-25 02:30:00.000 +0100|true|
+|B5|2026-10-25 23:59:59.000 +0100|true|
+|B6|2026-10-26 00:00:00.000 +0100|false|
+
+
+### scheduled run
+Данные для проверки расчета на расписании:
+```
+week_07/DE_Week_7_Data/dauly/2026-11-14/manifest.json
+week_07/DE_Week_7_Data/dauly/2026-11-14/payments.csv
+```
+После подготовки данных снимаем с паузы
+
+```sql
+SELECT
+    load_id,
+    run_id,
+    report_date,
+    source_path,
+    state,
+    read_rows,
+    prepared_rows
+FROM de7_etl.load_runs
+WHERE run_id LIKE 'scheduled__%'
+ORDER BY created_at DESC;
+```
+|load_id|run_id|report_date|source_path|state|read_rows|prepared_rows|
+|-------|------|-----------|-----------|-----|---------|-------------|
+|ee6ab4c7-d7ba-4ddf-ba75-8bfeffba47e6|scheduled__2026-11-14T23:00:00+00:00|2026-11-14|/mnt/c/Users/elo01/git/de_project/week_07/DE_Week_7_Data/daily/2026-11-14|published|2|2|
+
+
+```sql
+SELECT
+    report_date,
+    period_start,
+    period_end,
+    period_start =
+        (report_date::timestamp AT TIME ZONE 'Europe/Berlin')
+        AS start_ok,
+    period_end =
+        ((report_date + 1)::timestamp AT TIME ZONE 'Europe/Berlin')
+        AS end_ok,
+    EXTRACT(EPOCH FROM period_end - period_start) / 3600
+        AS hours,
+    state
+FROM de7_etl.load_runs
+WHERE load_id = 'ee6ab4c7-d7ba-4ddf-ba75-8bfeffba47e6'::uuid;
+```
+|report_date|period_start|period_end|start_ok|end_ok|hours|state|
+|-----------|------------|----------|--------|------|-----|-----|
+|2026-11-14|2026-11-14 00:00:00.000 +0100|2026-11-15 00:00:00.000 +0100|true|true|24.0000000000000000|published|
+
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum
+FROM de7_core.payments_daily
+WHERE report_date = DATE '2026-11-14';
+```
+|report_date|currency|channel_id|payment_count|amount_sum|
+|-----------|--------|----------|-------------|----------|
+|2026-11-14|EUR|web|1|10.00|
+
+
+## Итоговая сверка с независимой агрегацией исходных корректных файлов по тем же правилам
+Контрольная табллица
+```sql
+CREATE TABLE IF NOT EXISTS de7_etl.qa_reference_payments (
+    source_system text,
+    payment_id text,
+    order_id text,
+    paid_at text,
+    amount text,
+    currency text,
+    status text,
+    channel_id text
+);
+```
+### 2026-10-24
+```sql
+TRUNCATE TABLE de7_etl.qa_reference_payments;
+```
+Импортируем в таблицу из csv файл:
+```
+...\week_07\DE_Week_7_Data\daily\2026-10-24\payments.csv
+```
+
+```sql
+SELECT
+    COUNT(*) AS source_rows,
+    COUNT(*) FILTER (WHERE status = 'succeeded')
+        AS succeeded_rows,
+    COUNT(*) FILTER (WHERE status = 'failed')
+        AS failed_rows
+FROM de7_etl.qa_reference_payments;
+```
+|source_rows|succeeded_rows|failed_rows|
+|-----------|--------------|-----------|
+|120|109|11|
+
+
+```sql
+SELECT
+    currency,
+    COUNT(*) AS succeeded_payments,
+    SUM(amount::numeric) AS succeeded_amount
+FROM de7_etl.qa_reference_payments
+WHERE status = 'succeeded'
+GROUP BY currency
+ORDER BY currency;
+```
+|currency|succeeded_payments|succeeded_amount|
+|--------|------------------|----------------|
+|EUR|73|6748.41|
+|USD|36|3294.54|
+
+Совпадает с манифестом:
+```
+  "row_count": 120,
+  "succeeded_amount_by_currency": {
+    "EUR": "6748.41",
+    "USD": "3294.54"
+  }
+```
+
+```sql
+WITH expected AS (
+    SELECT
+        (
+            paid_at::timestamptz
+            AT TIME ZONE 'Europe/Berlin'
+        )::date AS report_date,
+        currency,
+        CASE
+            WHEN TRIM(COALESCE(channel_id, '')) = ''
+            THEN 'unknown'
+            ELSE channel_id
+        END AS channel_id,
+        COUNT(*) AS payment_count,
+        SUM(amount::numeric) AS amount_sum
+    FROM de7_etl.qa_reference_payments
+    WHERE status = 'succeeded'
+    GROUP BY 1, 2, 3
+),
+actual AS (
+    SELECT
+        report_date,
+        currency,
+        channel_id,
+        payment_count,
+        amount_sum
+    FROM de7_core.payments_daily
+    WHERE report_date = DATE '2026-10-24'
+),
+differences AS (
+    (
+        SELECT * FROM expected
+        EXCEPT ALL
+        SELECT * FROM actual
+    )
+    UNION ALL
+    (
+        SELECT * FROM actual
+        EXCEPT ALL
+        SELECT * FROM expected
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+### 2026-10-25
+```sql
+TRUNCATE TABLE de7_etl.qa_reference_payments;
+```
+Импортируем в таблицу из csv файл:
+```
+...\week_07\DE_Week_7_Data\scenarios\corrected\payments.csv
+```
+
+```sql
+SELECT
+    COUNT(*) AS source_rows,
+    COUNT(*) FILTER (WHERE status = 'succeeded')
+        AS succeeded_rows,
+    COUNT(*) FILTER (WHERE status = 'failed')
+        AS failed_rows
+FROM de7_etl.qa_reference_payments;
+```
+|source_rows|succeeded_rows|failed_rows|
+|-----------|--------------|-----------|
+|120|109|11|
+
+
+```sql
+SELECT
+    currency,
+    COUNT(*) AS succeeded_payments,
+    SUM(amount::numeric) AS succeeded_amount
+FROM de7_etl.qa_reference_payments
+WHERE status = 'succeeded'
+GROUP BY currency
+ORDER BY currency;
+```
+|currency|succeeded_payments|succeeded_amount|
+|--------|------------------|----------------|
+|EUR|73|7737.03|
+|USD|36|3294.54|
+
+Совпадает с манифестом:
+```
+  "row_count": 120,
+  "succeeded_amount_by_currency": {
+    "EUR": "7737.03",
+    "USD": "3294.54"
+  }
+```
+
+```sql
+WITH expected AS (
+    SELECT
+        (
+            paid_at::timestamptz
+            AT TIME ZONE 'Europe/Berlin'
+        )::date AS report_date,
+        currency,
+        CASE
+            WHEN TRIM(COALESCE(channel_id, '')) = ''
+            THEN 'unknown'
+            ELSE channel_id
+        END AS channel_id,
+        COUNT(*) AS payment_count,
+        SUM(amount::numeric) AS amount_sum
+    FROM de7_etl.qa_reference_payments
+    WHERE status = 'succeeded'
+    GROUP BY 1, 2, 3
+),
+actual AS (
+    SELECT
+        report_date,
+        currency,
+        channel_id,
+        payment_count,
+        amount_sum
+    FROM de7_core.payments_daily
+    WHERE report_date = DATE '2026-10-25'
+),
+differences AS (
+    (
+        SELECT * FROM expected
+        EXCEPT ALL
+        SELECT * FROM actual
+    )
+    UNION ALL
+    (
+        SELECT * FROM actual
+        EXCEPT ALL
+        SELECT * FROM expected
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+### 2026-10-26
+```sql
+TRUNCATE TABLE de7_etl.qa_reference_payments;
+```
+Импортируем в таблицу из csv файл:
+```
+...\week_07\DE_Week_7_Data\daily\2026-10-26\payments.csv
+```
+
+```sql
+SELECT
+    COUNT(*) AS source_rows,
+    COUNT(*) FILTER (WHERE status = 'succeeded')
+        AS succeeded_rows,
+    COUNT(*) FILTER (WHERE status = 'failed')
+        AS failed_rows
+FROM de7_etl.qa_reference_payments;
+```
+|source_rows|succeeded_rows|failed_rows|
+|-----------|--------------|-----------|
+|120|109|11|
+
+
+```sql
+SELECT
+    currency,
+    COUNT(*) AS succeeded_payments,
+    SUM(amount::numeric) AS succeeded_amount
+FROM de7_etl.qa_reference_payments
+WHERE status = 'succeeded'
+GROUP BY currency
+ORDER BY currency;
+```
+|currency|succeeded_payments|succeeded_amount|
+|--------|------------------|----------------|
+|EUR|73|6748.41|
+|USD|36|3294.54|
+
+Совпадает с манифестом:
+```
+  "row_count": 120,
+  "succeeded_amount_by_currency": {
+    "EUR": "6748.41",
+    "USD": "3294.54"
+  }
+```
+
+```sql
+WITH expected AS (
+    SELECT
+        (
+            paid_at::timestamptz
+            AT TIME ZONE 'Europe/Berlin'
+        )::date AS report_date,
+        currency,
+        CASE
+            WHEN TRIM(COALESCE(channel_id, '')) = ''
+            THEN 'unknown'
+            ELSE channel_id
+        END AS channel_id,
+        COUNT(*) AS payment_count,
+        SUM(amount::numeric) AS amount_sum
+    FROM de7_etl.qa_reference_payments
+    WHERE status = 'succeeded'
+    GROUP BY 1, 2, 3
+),
+actual AS (
+    SELECT
+        report_date,
+        currency,
+        channel_id,
+        payment_count,
+        amount_sum
+    FROM de7_core.payments_daily
+    WHERE report_date = DATE '2026-10-26'
+),
+differences AS (
+    (
+        SELECT * FROM expected
+        EXCEPT ALL
+        SELECT * FROM actual
+    )
+    UNION ALL
+    (
+        SELECT * FROM actual
+        EXCEPT ALL
+        SELECT * FROM expected
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+|different_rows|
+|--------------|
+|0|
+
+### 2026-10-27
+```sql
+TRUNCATE TABLE de7_etl.qa_reference_payments;
+```
+Импортируем в таблицу из csv файл:
+```
+...\week_07\DE_Week_7_Data\daily\2026-10-27\payments.csv
+```
+
+```sql
+SELECT
+    COUNT(*) AS source_rows,
+    COUNT(*) FILTER (WHERE status = 'succeeded')
+        AS succeeded_rows,
+    COUNT(*) FILTER (WHERE status = 'failed')
+        AS failed_rows
+FROM de7_etl.qa_reference_payments;
+```
+|source_rows|succeeded_rows|failed_rows|
+|-----------|--------------|-----------|
+|0|0|0|
+
+
+```sql
+SELECT
+    currency,
+    COUNT(*) AS succeeded_payments,
+    SUM(amount::numeric) AS succeeded_amount
+FROM de7_etl.qa_reference_payments
+WHERE status = 'succeeded'
+GROUP BY currency
+ORDER BY currency;
+--0 строк
+
+WITH expected AS (
+    SELECT
+        (
+            paid_at::timestamptz
+            AT TIME ZONE 'Europe/Berlin'
+        )::date AS report_date,
+        currency,
+        CASE
+            WHEN TRIM(COALESCE(channel_id, '')) = ''
+            THEN 'unknown'
+            ELSE channel_id
+        END AS channel_id,
+        COUNT(*) AS payment_count,
+        SUM(amount::numeric) AS amount_sum
+    FROM de7_etl.qa_reference_payments
+    WHERE status = 'succeeded'
+    GROUP BY 1, 2, 3
+),
+actual AS (
+    SELECT
+        report_date,
+        currency,
+        channel_id,
+        payment_count,
+        amount_sum
+    FROM de7_core.payments_daily
+    WHERE report_date = DATE '2026-10-27'
+),
+differences AS (
+    (
+        SELECT * FROM expected
+        EXCEPT ALL
+        SELECT * FROM actual
+    )
+    UNION ALL
+    (
+        SELECT * FROM actual
+        EXCEPT ALL
+        SELECT * FROM expected
+    )
+)
+SELECT COUNT(*) AS different_rows
+FROM differences;
+```
+
+|different_rows|
+|--------------|
+|0|
+
+
+### Проверка перехода на зимнее время
+```sql
+TRUNCATE TABLE de7_etl.qa_reference_payments;
+```
+Импортируем в таблицу из csv файл:
+```
+...\week_07\DE_Week_7_Data\boundary_events.csv
+```
+
+```sql
+SELECT
+    payment_id,
+    paid_at,
+    paid_at::timestamptz AT TIME ZONE 'UTC' AS paid_at_utc
+FROM de7_etl.qa_reference_payments
+WHERE payment_id IN ('B3', 'B4')
+ORDER BY paid_at::timestamptz;
+```
+|payment_id|paid_at|paid_at_utc|
+|----------|-------|-----------|
+|B3|2026-10-25T02:30:00+02:00|2026-10-25 00:30:00.000|
+|B4|2026-10-25T02:30:00+01:00|2026-10-25 01:30:00.000|
+
+## История запусков
+```sql
+SELECT
+    load_id,
+    run_id,
+    report_date,
+    source_version,
+    state,
+    read_rows,
+    accepted_rows,
+    rejected_rows,
+    prepared_rows,
+    last_error
+FROM de7_etl.load_runs
+ORDER BY created_at DESC
+```
+|load_id|run_id|report_date|source_version|state|read_rows|accepted_rows|rejected_rows|prepared_rows|last_error|
+|-------|------|-----------|--------------|-----|---------|-------------|-------------|-------------|----------|
+|927b14fd-1eae-427f-8b65-a8223bd0028f|manual__2026-11-15T00:13:55.509526+00:00|2026-10-25|daily_2026-10-25|blocked|120|120|0|120|Результат 534 не относится к этой загрузке|
+|ae3b1b92-5672-4afb-a9fe-a3bacac5d6f0|manual__2026-11-15T00:11:47.289913+00:00|2026-10-25|daily_2026-10-25|blocked|120|120|0|120|Не хватает результатов обязательных проверок; Неполный или повторяющийся список правил|
+|4d3589e9-1dd5-42bb-ab7d-0337b1041b93|manual__2026-11-14T23:46:46.771009+00:00|2026-10-26|daily_2026-10-26|published|120|120|0|120||
+|fb3092a8-3374-450e-90be-4e0a8ab20009|manual__2026-11-14T23:44:43.307900+00:00|2026-10-26|daily_2026-10-26|checked|120|120|0|120||
+|775d26bb-747a-43f2-8f10-93155e09281d|manual__2026-11-14T23:40:14.413661+00:00|2026-10-26|daily_2026-10-26|published|120|120|0|120||
+|547ae61e-c090-409d-aba7-30bac6032ed7|manual__2026-11-14T23:36:20.997989+00:00|2026-10-26|daily_2026-10-26|created||||||
+|9e88de4e-6729-45ac-8328-4803571953b3|manual__2026-11-14T23:35:03.773974+00:00|2026-10-26|daily_2026-10-26|published|120|120|0|120||
+|540da43d-3c5f-4d6b-a530-16c727d16812|manual__2026-11-14T23:30:08.107041+00:00|2026-10-27|daily_2026-10-27|published|0|0|0|0||
+|ab1f2698-04d5-4983-9a51-728640239091|manual__2026-11-14T23:23:31.503628+00:00|2026-10-25|scenarios_corrected|published|120|120|0|120||
+|ee6ab4c7-d7ba-4ddf-ba75-8bfeffba47e6|scheduled__2026-11-14T23:00:00+00:00|2026-11-14|daily_2026-11-14_test|published|2|2|0|2||
+|58ed8e37-01dc-44bb-a6cd-d56a9de2d3c1|manual__2026-11-14T22:52:27.302803+00:00|2026-10-25|scenarios_corrected|published|120|120|0|120||
+|3453eeec-8df0-4c63-9be2-b67a0f361e9d|manual__2026-11-14T22:50:27.341814+00:00|2026-10-25|daily_2026-10-25|published|120|120|0|120||
+|415830db-e9b9-4d30-8275-4acbe892bd62|manual__2026-11-14T22:12:43.798320+00:00|2026-10-25|scenarios_warning|published|120|120|0|120||
+|92973d71-05ac-4d21-a7a5-032baee11966|manual__2026-11-14T21:45:51.786902+00:00|2026-10-25||failed|||||Некорректный manifest|
+|54247d67-b7ca-4d6b-a5e0-4880a6898ec2|manual__2026-11-14T21:41:55.965999+00:00|2026-10-25|scenarios_control_mismatch|blocked|120|120|0|120|manifest_success_sums: FAIL|
+|630f7f65-3e2e-4316-8382-b80d67795be6|manual__2026-11-14T21:40:44.949791+00:00|2026-10-25|scenarios_stale|blocked|120|120|0|120|source_coverage: FAIL|
+|65ecbadd-43ac-47ad-87f9-a6ed7dcd4419|manual__2026-11-14T21:38:32.045257+00:00|2026-10-25|scenarios_unconfirmed_empty|blocked|0|0|0|0|source_coverage: FAIL; manifest_row_count: FAIL; manifest_success_sums: FAIL; empty_input_confirmed: FAIL; missing_channel_share: NOT_EVALUATED|
+|4609ecbb-14f5-4a10-b355-ec60abe99f34|manual__2026-11-14T21:36:16.387567+00:00|2026-10-25|scenarios_incomplete|blocked|100|100|0|100|source_coverage: FAIL; manifest_row_count: FAIL; manifest_success_sums: FAIL|
+|92b08892-a48c-452a-abb7-a0f42275cbd1|manual__2026-11-14T21:30:36.743151+00:00|2026-10-25|scenarios_invalid_records|blocked|121|112|9|112|required_fields: FAIL; payment_key_unique: FAIL; paid_at_parse: FAIL; paid_at_in_period: FAIL; amount_valid: FAIL; currency_allowed: FAIL; status_allowed: FAIL; channel_known: FAIL; manifest_row_count: FAIL; manifest_success_sums: NOT_EVALUATED|
+|ae4e9c6f-b9b0-4f36-a787-b086445fc98d|manual__2026-11-14T21:22:31.137641+00:00|2026-10-25|scenarios_channel_limit|blocked|120|120|0|120|missing_channel_share: FAIL|
+|5ff6697d-4f6c-48e9-874d-d15a77eb08d7|manual__2026-11-14T21:11:32.946940+00:00|2026-10-25|daily_2026-10-25|published|120|120|0|120||
+|090b0a59-8f3d-4c70-ae18-33c32c374509|manual__2026-11-14T20:10:06.253370+00:00|2026-10-26|daily_2026-10-26|published|120|120|0|120||
+|71ceffb9-4f00-4c1c-a438-237fdbebe1fa|manual__2026-11-14T20:09:10.893826+00:00|2026-10-25|daily_2026-10-25|published|120|120|0|120||
+|358653be-520b-4d84-b100-688cfe3f8e09|manual__2026-11-14T19:20:08.151215+00:00|2026-10-24|daily_2026-10-24|published|120|120|0|120||
+
+
+
+*****
+## Проблема подключения Apache Airflow к PostgreSQL из WSL Ubuntu
+### 1. Описание окружения
+
+При выполнении задания по созданию DAG для загрузки ежедневных платежей возникла проблема подключения Apache Airflow к PostgreSQL.
+
+Используемое окружение:
+
+| Компонент | Конфигурация |
+|---|---|
+| Основная ОС | Windows |
+| Среда Airflow | WSL2, Ubuntu |
+| Apache Airflow | 3.3.2 |
+| Executor | LocalExecutor |
+| PostgreSQL | Сервер, доступный из Windows |
+| База данных | `de_course` |
+| Пользователь | `de_student` |
+| Порт PostgreSQL | `5432` |
+| Инструмент работы с БД | DBeaver |
+| Airflow Connection ID | `marketline_pg` |
+
+PostgreSQL был доступен из DBeaver по адресу `localhost:5432`. В Airflow была создана Connection с теми же параметрами подключения.
+
+DAG успешно появился в интерфейсе Airflow, однако при первом запуске задача `receive_files` завершилась ошибкой. Остальные задачи получили статус `upstream_failed` и не выполнялись.
+
+### 2. Первая ошибка — Connection refused
+
+В логах задачи `receive_files` возникла ошибка:
+
+```text
+OperationalError: connection failed:
+connection to server at "127.0.0.1", port 5432 failed:
+Connection refused
+```
+
+Ошибка возникала в функции `connect_db()` при выполнении `psycopg.connect()`.
+
+**Причина:** Airflow выполнялся в Ubuntu через WSL2, а PostgreSQL был доступен из Windows. В используемом сетевом окружении адрес `127.0.0.1` внутри Ubuntu не обеспечивал подключение к PostgreSQL на Windows-хосте.
+
+Изначально я использовала адрес `127.0.0.1`, поскольку он успешно работал в DBeaver. Однако настройки, подходящие для приложения Windows, не обязательно подходят приложению внутри WSL.
+
+#### Диагностика
+
+В терминале Ubuntu выполнила:
+
+```bash
+ip route show default
+```
+
+Результат:
+
+```text
+default via 172.24.0.1 dev eth0 proto kernel onlink
+```
+
+Адрес `172.24.0.1` является адресом Windows-хоста, доступным из WSL в используемой сетевой конфигурации.
+
+Затем проверила сетевую доступность порта PostgreSQL с помощью Python:
+
+```python
+import socket
+
+for host in ["127.0.0.1", "172.24.0.1"]:
+    try:
+        with socket.create_connection((host, 5432), timeout=3):
+            print(host, "OK")
+    except OSError as error:
+        print(host, "FAIL:", error)
+```
+
+Результат:
+
+```text
+127.0.0.1 FAIL: Connection refused
+172.24.0.1 OK
+```
+
+Это подтвердило, что порт PostgreSQL доступен через IP Windows-хоста, но не через `localhost` внутри Ubuntu.
+
+**Решение:** изменила Host в Airflow Connection `marketline_pg` с `127.0.0.1` на `172.24.0.1`.
+
+### 3. Вторая ошибка — ограничение доступа в pg_hba.conf
+
+После изменения Host соединение с сервером стало устанавливаться, но задача `receive_files` продолжала завершаться ошибкой.
+
+В логах появилась следующая информация:
+
+```text
+connection to server at "172.24.0.1",
+port 5432 failed:
+
+no pg_hba.conf entry for host "172.24.11.11",
+user "de_student", database "de_course"
+```
+
+Таким образом, была устранена сетевая проблема, но обнаружилось ограничение на стороне PostgreSQL.
+
+Здесь используются два разных IP-адреса:
+
+- `172.24.0.1` — адрес Windows-хоста, на котором доступен PostgreSQL.
+- `172.24.11.11` — IP Ubuntu, с которого PostgreSQL получает запрос на подключение.
+
+**Причина:** PostgreSQL использует файл `pg_hba.conf` для управления клиентской аутентификацией. В нём не было подходящего разрешающего правила для подключения пользователя `de_student` к базе `de_course` с IP Ubuntu.
+
+Поэтому PostgreSQL отклонял подключение, несмотря на то что сервер и порт были доступны по сети.
+
+#### Диагностика и исправление
+
+В DBeaver выполнила SQL-запрос:
+
+```sql
+SHOW hba_file;
+```
+
+Он позволяет определить расположение файла `pg_hba.conf`, используемого PostgreSQL.
+
+Затем добавила в конфигурацию разрешение для подключения из WSL.
+
+Пример подходящего правила:
+
+```text
+host    de_course    de_student    172.24.11.11/32    scram-sha-256
+```
+
+Это правило разрешает подключение к конкретной базе указанному пользователю с конкретного IP-адреса, используя парольную аутентификацию.
+
+Маска `/32` означает, что правило относится только к одному IPv4-адресу.
+
+Перезагрузка конфигурации (из-под админской учетки):
+```sql
+SELECT pg_reload_conf();
+```
+После применения настройки PostgreSQL перестал отклонять подключение из Ubuntu.
+
+### 4. Проверка результата
+
+После исправления сетевого адреса и правил PostgreSQL повторно запустила DAG `marketline_payments` через интерфейс Apache Airflow.
+
+Все семь задач завершились успешно:
+
+```text
+receive_files      SUCCESS
+stage_payments     SUCCESS
+prepare_payments   SUCCESS
+check_rows         SUCCESS
+check_totals       SUCCESS
+quality_gate       SUCCESS
+publish_payments   SUCCESS
+```
+
+Затем в DBeaver проверила опубликованную витрину:
+
+```sql
+SELECT
+    report_date,
+    currency,
+    channel_id,
+    payment_count,
+    amount_sum
+FROM de7_core.payments_daily
+WHERE report_date = '2026-10-24'
+ORDER BY currency, channel_id;
+```
+
+Полученный результат:
+
+| report_date | currency | channel_id | payment_count | amount_sum |
+|---|---|---|---:|---:|
+| 2026-10-24 | EUR | app | 37 | 3404.55 |
+| 2026-10-24 | EUR | partner | 36 | 3343.86 |
+| 2026-10-24 | USD | web | 36 | 3294.54 |
+
+Результат соответствует ожидаемой агрегации исходного файла.
+
+Всего опубликовано три группы, содержащие 109 успешных платежей. Суммы по валютам совпадают с контрольными значениями manifest.
+
+**Для устранения проблемы не потребовалось изменять бизнес-логику DAG или Python-загрузчика.** Ошибки были связаны исключительно с настройкой сетевого подключения и доступом к PostgreSQL.
+
+### 5. Выводы
+
+При настройке Apache Airflow в WSL2 необходимо учитывать, что Windows и Ubuntu могут использовать разные сетевые адреса.
+
+Успешное подключение к PostgreSQL из DBeaver на Windows не гарантирует возможность подключения из Airflow на Ubuntu.
+
+Проверку подключения целесообразно проводить поэтапно:
+
+1. Проверить, запущен ли сервер PostgreSQL.
+2. Определить IP Windows-хоста из WSL с помощью `ip route show default`.
+3. Проверить доступность порта `5432`.
+4. Указать правильный Host в Airflow Connection.
+5. При отказе PostgreSQL проверить правила `pg_hba.conf`.
+6. Повторить запуск задачи Airflow.
+7. Убедиться не только в успешном состоянии DAG, но и в фактической записи данных в целевую таблицу.
+
+Также важно различать сетевую доступность сервера и разрешение на подключение: успешная проверка TCP-порта не означает, что PostgreSQL разрешит аутентификацию пользователя.
+
+Используемые IP-адреса WSL могут измениться после перезапуска среды. Поэтому при повторном возникновении ошибки подключения необходимо заново проверить адрес Windows-хоста и адрес клиента Ubuntu.

@@ -1,0 +1,7 @@
+source_system,payment_id,order_id,paid_at,amount,currency,status,channel_id
+paygate,B1,OB1,2026-10-24T23:59:59+02:00,10.00,EUR,succeeded,web
+paygate,B2,OB2,2026-10-25T00:00:00+02:00,10.00,EUR,succeeded,web
+paygate,B3,OB3,2026-10-25T02:30:00+02:00,10.00,EUR,succeeded,web
+paygate,B4,OB4,2026-10-25T02:30:00+01:00,10.00,EUR,succeeded,web
+paygate,B5,OB5,2026-10-25T23:59:59+01:00,10.00,EUR,succeeded,web
+paygate,B6,OB6,2026-10-26T00:00:00+01:00,10.00,EUR,succeeded,web
