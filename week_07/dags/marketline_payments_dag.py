@@ -169,6 +169,17 @@ def stage_payments_task(received):
     if fault == "file_always" or (fault == "file_once" and attempt == 1):
         with connect_db() as conn:
             save_event(conn, received["load_id"], "stage_payments", attempt, "FAILED", reason="Тест недоступного CSV")
+            if fault == "file_always" and attempt >= 3:
+                conn.execute(
+                    """
+                    UPDATE de7_etl.load_runs
+                    SET state = 'failed',
+                        last_error = 'CSV недоступен после трех попыток',
+                        finished_at = clock_timestamp()
+                    WHERE load_id = %s
+                    """,
+                    (received["load_id"],)
+                )
         raise FileNotFoundError("Тест временной/постоянной недоступности CSV")
 
     manifest_path = Path(received["source_dir"]) / "manifest.json"
@@ -177,6 +188,26 @@ def stage_payments_task(received):
     except FileNotFoundError:
         raise
     except (ValueError, UnicodeError, csv.Error) as error:
+        reason = f"{type(error).__name__}: {error}"
+
+        with connect_db() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE de7_etl.load_runs
+                    SET csv_errors = %s,
+                        state = 'failed',
+                        last_error = %s,
+                        finished_at = clock_timestamp()
+                    WHERE load_id = %s
+                    """,
+                    ([f"CSV_ERROR: {reason}"], reason[:2000], received["load_id"]),
+                )
+
+            save_event(
+                conn, received["load_id"], "stage_payments", attempt, "FAILED", reason=reason[:2000]
+            )
+
         raise AirflowFailException("Ошибка формата или кодировки CSV") from error
     with connect_db() as conn:
         try:
@@ -281,8 +312,19 @@ def publish_payments_task(approved):
                 fail_inside_publication=(conf.get("test_failure") == "inside_publication"),
             )
         except Exception as error:
-            save_event(conn, approved["load_id"], "publish_payments", attempt, "FAILED", 
-                       reason=f"{type(error).__name__}: откат публикации")
+            reason = f"{type(error).__name__}: {error}"
+            save_event(conn, approved["load_id"], "publish_payments", attempt, "FAILED", reason=reason[:2000])
+            conn.execute(
+                """
+                UPDATE de7_etl.load_runs
+                SET state = 'failed',
+                    last_error = %s,
+                    finished_at = clock_timestamp()
+                WHERE load_id = %s
+                """,
+                (reason[:2000], approved["load_id"])
+            )
+
             raise
         save_event(conn, approved["load_id"], "publish_payments", attempt, "SUCCESS", counters={"published_groups": published})
     return {"load_id": approved["load_id"], "published_groups": published}

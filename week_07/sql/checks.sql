@@ -252,6 +252,20 @@ SELECT COUNT(*) AS raw_rows
 FROM de7_stg.payments_raw
 WHERE load_id = '92973d71-05ac-4d21-a7a5-032baee11966'::uuid;
 
+--Проверка обработки ошибки csv
+SELECT
+    l.load_id,
+    l.state,
+    l.last_error,
+    l.finished_at,
+    e.task_id,
+    e.attempt,
+    e.event_status,
+    e.reason
+FROM de7_etl.load_runs l
+JOIN de7_etl.load_events e ON e.load_id = l.load_id
+WHERE l.source_path LIKE '%test_wrong_header%'
+ORDER BY e.event_at DESC;
 
 -- === Предупреждение, исправленная версия и пустая поставка / warning — допустимое отсутствие канала ===
 -- [25] Проверка из отчёта

@@ -966,7 +966,6 @@ def check_quality(conn, load_id, group, attempt):
         bad_rows = None
         detail = ""
         unit = "records"
-        severity = "WARNING" if name == "missing_channel_share" else "CRITICAL"
 
         if group == "rows":
             if name not in row_summaries and raw_count > 0:
@@ -1022,7 +1021,11 @@ def check_quality(conn, load_id, group, attempt):
                     })
                     detail = "Техническая ошибка SQL-проверки"
                     technical_errors.append(name)
-
+        severity = (
+            "WARNING" 
+            if name == "missing_channel_share" and status in ("PASS", "WARN")
+            else "CRITICAL"
+        )
         with conn.transaction():
             result_id = conn.execute(
                 """
