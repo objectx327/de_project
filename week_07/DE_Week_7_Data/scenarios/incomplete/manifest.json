@@ -1,0 +1,13 @@
+{
+  "snapshot_id": "scenarios_incomplete",
+  "source_system": "paygate",
+  "period_start": "2026-10-25T00:00:00+02:00",
+  "period_end": "2026-10-26T00:00:00+01:00",
+  "complete": false,
+  "covered_until": "2026-10-26T00:00:00+01:00",
+  "row_count": 120,
+  "succeeded_amount_by_currency": {
+    "EUR": "6748.41",
+    "USD": "3294.54"
+  }
+}

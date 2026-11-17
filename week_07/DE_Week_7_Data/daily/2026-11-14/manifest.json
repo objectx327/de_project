@@ -1,0 +1,12 @@
+{
+  "snapshot_id": "daily_2026-11-14_test",
+  "source_system": "paygate",
+  "period_start": "2026-11-14T00:00:00+01:00",
+  "period_end": "2026-11-15T00:00:00+01:00",
+  "complete": true,
+  "covered_until": "2026-11-15T00:00:00+01:00",
+  "row_count": 2,
+  "succeeded_amount_by_currency": {
+    "EUR": "10.00"
+  }
+}

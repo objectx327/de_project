@@ -1,0 +1,3 @@
+source_system,payment_id,order_id,paid_at,amount,currency,status,channel_id
+paygate,S20261114001,O20261114001,2026-11-14T12:00:00+01:00,10.00,EUR,succeeded,web
+paygate,S20261114002,O20261114002,2026-11-14T16:30:00+01:00,5.00,USD,failed,app

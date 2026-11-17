@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "daily_2026-10-27",
+  "source_system": "paygate",
+  "period_start": "2026-10-27T00:00:00+01:00",
+  "period_end": "2026-10-28T00:00:00+01:00",
+  "complete": true,
+  "covered_until": "2026-10-28T00:00:00+01:00",
+  "row_count": 0,
+  "succeeded_amount_by_currency": {}
+}
